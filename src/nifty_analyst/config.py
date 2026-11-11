@@ -52,10 +52,13 @@ class AnalystConfig:
     deduplicate_intraday_alerts: bool = True
 
     # Liquidity & IVP gate thresholds
+    # Note (Item 4): min_top_book_depth_lots defaults to 0 so small touch quantities are kept
+    # available as explicitly INDICATIVE rather than blanket-halted; full-size execution vs
+    # indicative-touch scenario is enforced via touch_available_qty & walk_depth_levels.
     min_leg_liquidity_score: float = 50.0
     max_relative_bid_ask_spread_pct: float = 5.0
     min_strike_oi: int = 10000
-    min_top_book_depth_lots: int = 5
+    min_top_book_depth_lots: int = 0
     max_event_calendar_age_days: int = 14
 
     # Single-Pass Persona Synthesis & Spend Guard (Section 10 - Zero Multicall)

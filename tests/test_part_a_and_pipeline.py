@@ -540,6 +540,8 @@ def test_agent_artifact_provider_interface_round_trip(tmp_path: Path) -> None:
             {
                 "model_id": "whatsapp-persona-agent-v1",
                 "run_id": req["run_id"],
+                "snapshot_id": req["snapshot_id"],
+                "evidence_sha256": req["evidence_sha256"],
                 "decision_timestamp_ist": req["decision_timestamp_ist"],
                 "reasoning_summary": "Single-pass Bull/Bear/Vol debate and Consolidator synthesis.",
                 "habitual_comparison_note": "Evaluated verticals, butterflies, and condors without STT.",
@@ -616,6 +618,8 @@ def test_agent_artifact_provider_interface_round_trip(tmp_path: Path) -> None:
     bad_payload = {
         "model_id": "whatsapp-persona-agent-v1",
         "run_id": state_req["run_id"],
+        "snapshot_id": state_req["snapshot_id"],
+        "evidence_sha256": state_req["evidence_sha256"],
         "decision_timestamp_ist": state_req["decision_timestamp_ist"],
         "reasoning_summary": "x",
         "habitual_comparison_note": "x",

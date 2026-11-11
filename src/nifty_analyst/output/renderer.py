@@ -12,12 +12,23 @@ from nifty_analyst.state import CandidateStructure, NiftyOptionsState
 
 def _format_candidate_row(c: CandidateStructure) -> str:
     kind_dir = f"{c.structure_type} ({c.direction}, {c.expiry_date}, {c.dte_trading_sessions} DTE, lot={c.lot_size})"
-    net_str = f"{'Credit' if c.is_net_credit else 'Debit'} {c.executable_net_points_per_unit:.2f} pts"
-    be_str = ", ".join(f"{b:.1f}" for b in c.breakevens_net) or "N/A"
     style_str = "Habitual" if c.matches_part_b_style else "Open Compare"
+    be_str = ", ".join(f"{b:.1f}" for b in c.breakevens_net) or "N/A"
+    if c.full_size_fill_supported:
+        net_str = f"{'Credit' if c.is_net_credit else 'Debit'} {c.executable_net_points_per_unit:.2f} pts ({c.execution_fill_basis})"
+        loss_str = f"contractual max loss Rs {c.contractual_max_loss_rs:,.2f}"
+    else:
+        net_str = (
+            f"INDICATIVE Touch {'Credit' if c.is_net_credit else 'Debit'} "
+            f"{c.indicative_touch_net_points_per_unit:.2f} pts (full-size entry=UNKNOWN; {c.execution_fill_basis})"
+        )
+        loss_str = (
+            f"INDICATIVE touch bound Rs {c.indicative_touch_max_loss_rs:,.2f} "
+            f"(full-size max loss=UNKNOWN; Assumption: {c.price_assumption_label})"
+        )
     return (
         f"- `{c.structure_id}` - {kind_dir}: Tech+Opt Score **{c.technical_options_score:.1f}/100**; "
-        f"net {net_str}; contractual max loss Rs {c.contractual_max_loss_rs:,.2f}; "
+        f"net {net_str}; {loss_str}; "
         f"planned stop Rs {c.planned_stop_rs:,.2f}; net BE {be_str}; "
         f"PoP (lognormal / empirical) {c.pop_lognormal_expiry:.1f}% / {c.pop_empirical_expiry:.1f}%; "
         f"net vega Rs {c.net_vega_rs:+.2f}; Part A **{c.part_a_overall_status}** ({style_str})."
@@ -66,6 +77,19 @@ def render_analyst_report(
     lines.append(
         f"- **Data Version Hash**: `{meta.data_version_hash}` | **Config Hash**: `{meta.config_hash}`"
     )
+    if meta.snapshot_id:
+        lines.append(
+            f"- **Evidence Snapshot**: `{meta.snapshot_id}` (SHA256: `{meta.evidence_sha256}`, "
+            f"Captured: `{meta.capture_started_at_ist}` .. `{meta.capture_completed_at_ist}`)"
+        )
+    if meta.surface_coverage_status == "SINGLE_EXPIRY_DEGRADED":
+        lines.append(
+            "- **Surface Coverage**: `SINGLE_EXPIRY_DEGRADED` (anchor expiry only; multi-expiry surface interpolation not active on this path)"
+        )
+    if meta.uncovered_held_neo_symbols:
+        lines.append(
+            f"- **Uncovered Held Contracts Warning**: `{meta.uncovered_held_neo_symbols}` not depth-covered on evaluated expiry(s)"
+        )
 
     lines.append("- **Active Contract-Master Expiries (Zero Hardcoded Weekdays/Lot Sizes)**:")
     for exp in ctx.active_expiries:
@@ -225,20 +249,37 @@ def render_analyst_report(
             f"Wing Width = `{primary.width_points:.0f} pts`."
         )
         lines.append(
-            f"- **Executable Entry**: Net `{'Credit' if primary.is_net_credit else 'Debit'}` = "
+            f"- **Executable Entry (`{primary.execution_fill_basis}`)**: Net `{'Credit' if primary.is_net_credit else 'Debit'}` = "
             f"`{primary.executable_net_points_per_unit:.2f} pts/unit` (after `{primary.slippage_buffer_points_per_unit:.2f} pts` "
-            f"slippage buffer; Non-STT Execution Fees = `Rs {primary.statutory_charges.total_charges_rs:.2f}`)."
+            f"slippage buffer; Non-STT Execution Fees = `Rs {primary.statutory_charges.total_charges_rs:.2f}`). "
+            f"Assumption: `{primary.price_assumption_label}`"
         )
         if fo and fo.payoff_diagram_path:
             lines.append(f"- **Payoff Diagram PNG**: `{fo.payoff_diagram_path}`")
         lines.append("")
         lines.append("### Legs Specification")
         for leg in primary.legs:
+            touch_str = (
+                f"{leg.touch_available_qty:,} units"
+                if leg.touch_available_qty is not None
+                else "UNKNOWN"
+            )
+            vis_str = (
+                f"{leg.visible_depth_qty:,} units ({leg.top_book_depth_lots} lots)"
+                if leg.visible_depth_qty is not None
+                else f"{leg.top_book_depth_lots} lots"
+            )
+            walk_str = (
+                f"; walked VWAP {leg.vwap_fill_price:.4f} ({leg.fill_basis})"
+                if leg.vwap_fill_price is not None and leg.fill_basis == "FULL_SIZE_BOOK_WALK"
+                else f" ({leg.fill_basis})"
+            )
             lines.append(
                 f"- **{leg.side} {leg.ratio}x {leg.strike:.0f} {leg.option_type}**: "
-                f"bid {leg.bid:.2f} / ask {leg.ask:.2f} / mid {leg.mid:.2f}; IV (mid) {leg.iv * 100:.2f}%; "
+                f"bid {leg.bid:.2f} / ask {leg.ask:.2f} / mid {leg.mid:.2f}{walk_str}; IV (mid) {leg.iv * 100:.2f}%; "
                 f"delta {leg.delta:+.3f}, gamma {leg.gamma:.5f}, daily theta {leg.theta_daily:+.2f}, "
-                f"vega (1% vol) {leg.vega_per_vol_pt:+.2f}; OI {leg.oi:,}; book depth {leg.top_book_depth_lots} lots; "
+                f"vega (1% vol) {leg.vega_per_vol_pt:+.2f}; OI {leg.oi:,}; "
+                f"touch qty {touch_str} | visible depth {vis_str}; "
                 f"liquidity score {leg.liquidity_score:.1f}."
             )
         lines.append("")

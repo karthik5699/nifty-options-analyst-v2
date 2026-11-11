@@ -138,7 +138,7 @@ def run_scheduled_slot(
     broker_adapter: KotakNeoReadOnlyPort | None = None,
     llm_provider: LLMProvider | None = None,
     open_positions: Sequence[OpenPosition] | None = None,
-    suppress_trader_alerts: bool = False,
+    suppress_trader_alerts: bool = True,
 ) -> ScheduledSlotResult:
     """Execute one scheduled slot if `now_ist` is calendar-approved and no concurrent stream holds the lock."""
     dec_ist = ensure_ist(now_ist)
@@ -227,7 +227,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--suppress-alerts",
         action="store_true",
-        help="Run pipeline and write audit log with trader recommendations/alerts suppressed",
+        default=True,
+        help="Keep trader recommendations/alerts suppressed (default: True while live gates are OFF)",
+    )
+    parser.add_argument(
+        "--enable-alerts",
+        action="store_false",
+        dest="suppress_alerts",
+        help="Allow trader alerts only when explicitly authorized and all live-readiness gates pass",
     )
     args = parser.parse_args(argv)
 

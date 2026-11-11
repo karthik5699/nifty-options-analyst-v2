@@ -107,6 +107,9 @@ def build_compact_desk_brief(
                 "overnight_gap_stress_3pct_loss_rs": c.overnight_gap_stress_3pct_loss_rs,
                 "invalidation_level": c.invalidation_level,
                 "technical_options_score": c.technical_options_score,
+                "execution_fill_basis": c.execution_fill_basis,
+                "full_size_fill_supported": c.full_size_fill_supported,
+                "price_assumption_label": c.price_assumption_label,
             }
         )
 
@@ -123,13 +126,20 @@ def build_compact_desk_brief(
                     "status": c.part_a_overall_status,
                     "non_pass_rules": failed_rules,
                     "contractual_max_loss_rs": c.contractual_max_loss_rs,
+                    "execution_fill_basis": c.execution_fill_basis,
+                    "full_size_fill_supported": c.full_size_fill_supported,
                 }
             )
 
     brief = {
         "run_context": {
             "run_id": state.run_metadata.run_id,
+            "snapshot_id": state.run_metadata.snapshot_id,
+            "evidence_sha256": state.run_metadata.evidence_sha256,
             "decision_timestamp_ist": state.run_metadata.decision_timestamp_ist,
+            "mode": state.run_metadata.mode,
+            "surface_coverage_status": state.run_metadata.surface_coverage_status,
+            "uncovered_held_neo_symbols": state.run_metadata.uncovered_held_neo_symbols,
             "spot": state.contract_context.spot.value,
             "active_expiries": [
                 {
@@ -243,6 +253,29 @@ def build_single_pass_persona_prompt(desk_brief: dict[str, Any]) -> str:
     )
 
 
+def is_pre_llm_live_ready_eligible(
+    state: NiftyOptionsState,
+    chosen: CandidateStructure | None,
+) -> bool:
+    """Return True only when all pre-LLM deterministic & live-readiness gates are satisfied.
+
+    In `LIVE_MORNING_SNAPSHOT` mode this always returns False until exchange quote timestamps,
+    multi-expiry / held-contract surface coverage, and HTTP-boundary 2.5s pacing inside
+    `~/Kotak_API` wrappers are independently verified (Item 5).
+    """
+    vol = state.market_evidence.volatility_state
+    return (
+        chosen is not None
+        and chosen.part_a_overall_status == "PASS"
+        and chosen.full_size_fill_supported
+        and state.run_metadata.mode != "LIVE_MORNING_SNAPSHOT"
+        and state.portfolio_exposure_state.portfolio_state_status == "VERIFIED"
+        and vol.ivp_30d != "UNKNOWN"
+        and vol.ivp_90d != "UNKNOWN"
+        and not state.run_metadata.uncovered_held_neo_symbols
+    )
+
+
 def format_whatsapp_digest(
     state: NiftyOptionsState,
     selected: CandidateStructure | None,
@@ -259,13 +292,13 @@ def format_whatsapp_digest(
     iv_pct = vol.constant_maturity_30d_iv * 100.0
     skew_pts = vol.skew_25d_put_minus_call * 100.0
 
-    if selected is None:
+    if selected is None or selected.part_a_overall_status != "PASS" or not selected.full_size_fill_supported:
         return (
-            f"*NIFTY Options Desk — WAIT ({consolidator_conviction})*\n"
+            f"*NIFTY Options Desk — WAIT (SIT_OUT)*\n"
             f"• Spot: {spot:.1f} | 1D: {ps.trend_1d_state} | 1H RSI: {ps.rsi_14_1h:.1f}\n"
             f"• Surface: CM30 IV {iv_pct:.2f}% | 90d IVP {vol.ivp_90d} | Skew {skew_pts:+.2f} pts ({vol.term_structure_regime})\n"
             f"• OI Bracket: Put Wall {pos.put_oi_wall_strike:.0f} / Call Wall {pos.call_oi_wall_strike:.0f} (PCR {pos.pcr_oi:.2f})\n"
-            f"• Decision: Sit out (`WAIT`) — no structure cleared deterministic Part A & Consolidator conviction gates."
+            f"• Decision: Sit out (`WAIT`) — no structure cleared deterministic Part A, full-size depth, & Consolidator gates."
         )
 
     readiness_tag = "LIVE-READY" if is_live_ready else "RESEARCH-ONLY"
@@ -277,8 +310,8 @@ def format_whatsapp_digest(
     )
     return (
         f"*NIFTY Options Desk — SUGGESTION ({consolidator_conviction} | {readiness_tag})*\n"
-        f"• *Pick*: `{selected.structure_id}` ({selected.structure_type}, {selected.direction}, {selected.dte_trading_sessions} DTE)\n"
-        f"• *Legs* ({selected.lots} lot = {selected.lot_size * selected.lots} qty): {legs_txt}\n"
+        f"• *Pick*: `{selected.structure_id}` ({selected.structure_type}, {selected.direction}, {selected.expiry_date}, {selected.dte_trading_sessions} DTE)\n"
+        f"• *Legs* ({selected.lots} lot = {selected.lot_size * selected.lots} qty, {selected.execution_fill_basis}): {legs_txt}\n"
         f"• *Entry*: Net {entry_kind} {selected.executable_net_points_per_unit:.2f} pts | Tech+Opt Score: {selected.technical_options_score:.1f}/100\n"
         f"• *Market*: Spot {spot:.1f} | 1D {ps.trend_1d_state} (RSI {ps.rsi_14_1h:.1f}) | 90d IVP {vol.ivp_90d} | Skew {skew_pts:+.2f}v | Debate: {debate.dominant_regime}\n"
         f"• *Risk (4 Distinct Caps)*: Max Loss Rs {selected.contractual_max_loss_rs:,.0f} | Stop Rs {selected.planned_stop_rs:,.0f} (~{selected.indicative_stop_index_level:.0f}) | Summed Stop Rs {selected.portfolio_summed_stop_after_trade_rs:,.0f}/10k | Margin ~Rs {selected.margin_estimate_rs:,.0f}\n"
@@ -454,12 +487,7 @@ def build_deterministic_personas(
             "gates or technical/volatility signals lack confirmed regime alignment."
         )
 
-    is_live_ready_preview = (
-        chosen is not None
-        and vol.ivp_30d != "UNKNOWN"
-        and vol.ivp_90d != "UNKNOWN"
-        and chosen.part_a_overall_status == "PASS"
-    )
+    is_live_ready_preview = is_pre_llm_live_ready_eligible(state, chosen)
     wa_digest = format_whatsapp_digest(
         state=state,
         selected=chosen,

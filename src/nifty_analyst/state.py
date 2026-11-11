@@ -77,6 +77,14 @@ class RunMetadata:
     model_ids: list[str]
     config_hash: str
     scheduled_slot_approved: bool
+    snapshot_id: str = ""
+    evidence_sha256: str = ""
+    capture_started_at_ist: str = ""
+    capture_completed_at_ist: str = ""
+    surface_coverage_status: Literal["MULTI_EXPIRY_FULL", "SINGLE_EXPIRY_DEGRADED"] = (
+        "MULTI_EXPIRY_FULL"
+    )
+    uncovered_held_neo_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -277,6 +285,13 @@ class OptionLeg:
     quote_timestamp_ist: str
     is_stale: bool
     liquidity_score: float
+    touch_available_qty: int | None = None
+    visible_depth_qty: int | None = None
+    book_levels: list[list[float]] = field(default_factory=list)
+    vwap_fill_price: float | None = None
+    fill_basis: Literal["FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"] = (
+        "FULL_SIZE_TOUCH"
+    )
 
 
 @dataclass(frozen=True)
@@ -359,6 +374,15 @@ class CandidateStructure:
     part_a_overall_status: RuleStatus
     matches_part_b_style: bool
     technical_options_score: float = 0.0
+    execution_fill_basis: Literal[
+        "FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"
+    ] = "FULL_SIZE_TOUCH"
+    full_size_fill_supported: bool = True
+    full_size_executable_net_points_per_unit: float | None = None
+    full_size_contractual_max_loss_rs: float | None = None
+    indicative_touch_net_points_per_unit: float = 0.0
+    indicative_touch_max_loss_rs: float = 0.0
+    price_assumption_label: str = ""
 
 
 @dataclass(frozen=True)

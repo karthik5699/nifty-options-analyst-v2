@@ -4,7 +4,7 @@ Enforces the live-verified safety invariants:
 1. `validate_history`: requires `exchange|instrument` neosymbol (e.g. `nse_cm|Nifty 50`),
    approved interval (`1min/3min/5min/10min/15min/30min/60min/D/W`), and <= 180-day span on D/W.
 2. `validate_quotes_batch`: requires 1..50 `{exchange_segment, instrument_token}` dicts.
-3. `interpret_depth_book`: sorts buy levels high-to-low and sell levels low-to-high; fails closed
+3. `interpret_depth_book`: validates original source order before pricing; fails closed
    to explicit `None` (`UNKNOWN`/unpriced, never `0.0` or `ltp`) on empty, locked, or crossed books,
    preserving the raw payload for audit logging.
 4. `PacedReadTransport`: enforces 2.5s serial spacing, a 35s per-run queue wait cap, and a persisted
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +45,7 @@ def _to_pos_float(val: Any) -> float | None:
         f = float(val)
     except (TypeError, ValueError):
         return None
-    if not (f > 0.0) or f != f:  # NaN / <= 0 check
+    if not math.isfinite(f) or not (f > 0.0):  # NaN / <= 0 check
         return None
     return f
 
@@ -54,7 +55,7 @@ def _to_pos_int(val: Any) -> int | None:
         return None
     try:
         i = int(float(val))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return i if i > 0 else None
 
@@ -154,6 +155,12 @@ def validate_quotes_batch(
 class DepthBookInterpretation:
     """Normalized order-book top/visible depth result.
 
+    NOTE ON `is_executable` / `is_structurally_valid`:
+    `is_executable` indicates **structural book acceptance only** (monotonic source order,
+    positive integer quantities, `0 < best_bid < best_ask`). It NEVER implies full-size
+    execution certainty at the displayed touch. Use `touch_bid_qty` / `touch_ask_qty` and
+    `walk_depth_levels(buy_levels|sell_levels, required_units)` to evaluate full-size fills.
+
     When `is_executable` is False, `best_bid` and `best_ask` are strictly `None`
     (never `0.0` and never `ltp`), and `raw_payload` is retained for audit diagnostics.
     """
@@ -166,13 +173,58 @@ class DepthBookInterpretation:
     resolved_lot_size: int
     rejection_reason: str = ""
     raw_payload: dict[str, Any] | None = None
+    touch_bid_qty: int | None = None
+    touch_ask_qty: int | None = None
+    visible_buy_qty: int | None = None
+    visible_sell_qty: int | None = None
+    buy_levels: tuple[tuple[float, int], ...] = ()
+    sell_levels: tuple[tuple[float, int], ...] = ()
+
+    @property
+    def is_structurally_valid(self) -> bool:
+        """Qualified alias clarifying `is_executable` is structural touch validity only."""
+        return self.is_executable
+
+
+def walk_depth_levels(
+    levels: Sequence[tuple[float, int] | Sequence[float | int]],
+    required_units: int,
+) -> tuple[float | None, int]:
+    """Compute exact quantity-weighted fill price across ordered depth levels for `required_units`.
+
+    Returns `(vwap_price, total_available_units)` when `total_available_units >= required_units`;
+    otherwise returns `(None, total_available_units)` without extrapolating unquoted liquidity.
+    """
+    if required_units <= 0:
+        raise ValueError(f"required_units must be > 0, got {required_units}")
+    total_avail = 0
+    remaining = required_units
+    weighted_notional = 0.0
+    for row in levels:
+        if len(row) < 2:
+            continue
+        px = float(row[0])
+        qty = int(row[1])
+        if px <= 0.0 or qty <= 0:
+            continue
+        total_avail += qty
+        if remaining > 0:
+            take = min(remaining, qty)
+            weighted_notional += px * float(take)
+            remaining -= take
+    if remaining > 0:
+        return None, total_avail
+    return weighted_notional / float(required_units), total_avail
 
 
 def interpret_depth_book(
     quote_payload: dict[str, Any] | None,
     fallback_lot_size: int,
 ) -> DepthBookInterpretation:
-    """Normalize a Kotak `quotes` depth book best-first and fail closed on invalid/crossed books."""
+    """Reject inconsistent source order before pricing; preserve rejected raw data.
+
+    Structurally usable touch prices are not a full-size execution guarantee.
+    """
     if not isinstance(quote_payload, dict) or not quote_payload:
         return DepthBookInterpretation(
             is_executable=False,
@@ -219,23 +271,44 @@ def interpret_depth_book(
     raw_buys = depth.get("buy") if isinstance(depth.get("buy"), list) else []
     raw_sells = depth.get("sell") if isinstance(depth.get("sell"), list) else []
 
-    valid_buys: list[tuple[float, int]] = []
-    for lvl in raw_buys:
-        if not isinstance(lvl, dict):
-            continue
-        p = _to_pos_float(lvl.get("price") if "price" in lvl else lvl.get("prc"))
-        q = _to_pos_int(lvl.get("quantity") if "quantity" in lvl else lvl.get("qty"))
-        if p is not None and q is not None:
-            valid_buys.append((p, q))
+    # Validate original order before sorting. Sorting mixed updates cannot
+    # certify which levels are current, and row-one fallback is not safe.
+    def reject(reason: str) -> DepthBookInterpretation:
+        return DepthBookInterpretation(
+            is_executable=False, best_bid=None, best_ask=None,
+            bid_depth_lots=None, ask_depth_lots=None,
+            resolved_lot_size=contract_lot, rejection_reason=reason,
+            raw_payload=dict(quote_payload),
+        )
 
-    valid_sells: list[tuple[float, int]] = []
-    for lvl in raw_sells:
-        if not isinstance(lvl, dict):
-            continue
-        p = _to_pos_float(lvl.get("price") if "price" in lvl else lvl.get("prc"))
-        q = _to_pos_int(lvl.get("quantity") if "quantity" in lvl else lvl.get("qty"))
-        if p is not None and q is not None:
-            valid_sells.append((p, q))
+    valid_sides: dict[str, list[tuple[float, int]]] = {}
+    for side in ("buy", "sell"):
+        rows = depth.get(side)
+        if rows is None:
+            rows = []
+        if not isinstance(rows, list):
+            return reject("DEPTH_SCHEMA_INVALID")
+        parsed: list[tuple[float, int]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                return reject("DEPTH_ROW_INVALID")
+            pr = row.get("price") if "price" in row else row.get("prc")
+            qr = row.get("quantity") if "quantity" in row else row.get("qty")
+            if isinstance(pr, bool) or isinstance(qr, bool):
+                return reject("DEPTH_ROW_INVALID")
+            try:
+                price, quantity = float(pr), float(qr)
+            except (TypeError, ValueError, OverflowError):
+                return reject("DEPTH_ROW_INVALID")
+            if not math.isfinite(price) or not math.isfinite(quantity) or not quantity.is_integer():
+                return reject("DEPTH_ROW_INVALID")
+            if price == 0 and quantity == 0:
+                continue
+            if price <= 0 or quantity <= 0:
+                return reject("DEPTH_ROW_INVALID")
+            parsed.append((price, int(quantity)))
+        valid_sides[side] = parsed
+    valid_buys, valid_sells = valid_sides["buy"], valid_sides["sell"]
 
     if not valid_buys or not valid_sells:
         reason = (
@@ -254,9 +327,11 @@ def interpret_depth_book(
             raw_payload=dict(quote_payload),
         )
 
-    # Sort best-first: highest bid first, lowest ask first
-    valid_buys.sort(key=lambda pair: pair[0], reverse=True)
-    valid_sells.sort(key=lambda pair: pair[0])
+    buy_prices = [p for p, _ in valid_buys]
+    sell_prices = [p for p, _ in valid_sells]
+    if buy_prices != sorted(buy_prices, reverse=True) or sell_prices != sorted(sell_prices):
+        return reject("DEPTH_LEVEL_ORDER_INCONSISTENT")
+    # Ordered duplicate prices are valid. No source reordering or row-one fallback.
 
     best_bid = valid_buys[0][0]
     best_ask = valid_sells[0][0]
@@ -273,6 +348,8 @@ def interpret_depth_book(
             raw_payload=dict(quote_payload),
         )
 
+    touch_bid_qty = sum(q for p, q in valid_buys if p == best_bid)
+    touch_ask_qty = sum(q for p, q in valid_sells if p == best_ask)
     vis_buy_qty = sum(q for _, q in valid_buys)
     vis_sell_qty = sum(q for _, q in valid_sells)
     bid_lots = vis_buy_qty // contract_lot
@@ -287,6 +364,12 @@ def interpret_depth_book(
         resolved_lot_size=contract_lot,
         rejection_reason="",
         raw_payload=None,
+        touch_bid_qty=touch_bid_qty,
+        touch_ask_qty=touch_ask_qty,
+        visible_buy_qty=vis_buy_qty,
+        visible_sell_qty=vis_sell_qty,
+        buy_levels=tuple((round(p, 4), int(q)) for p, q in valid_buys),
+        sell_levels=tuple((round(p, 4), int(q)) for p, q in valid_sells),
     )
 
 
@@ -299,7 +382,19 @@ class PacedCooldownActiveError(RuntimeError):
 
 
 class PacedReadTransport:
-    """Serial read-only request pacer enforcing 2.5s spacing, 35s queue cap, and 429 cooldown."""
+    """Serial read-only adapter-call pacer enforcing 2.5s spacing, 35s queue cap, and 429 cooldown.
+
+    LIMITATION (`HTTP_BOUNDARY_PACING_UNVERIFIED`):
+    This pacer spaces top-level calls issued by `LiveKotakNeoAdapter` (`client.quotes`,
+    `client.historical_data`, and `OptionChainService` methods). Because `~/Kotak_API`'s
+    `OptionChainService` wrappers (`get_full_option_chain`, `get_futures_chain`, `get_expiries`)
+    can internally perform multiple HTTP requests (chain, spot, futures) without sharing this
+    pacer, wrapper-level call counting does NOT certify 2.5s spacing at the underlying HTTP
+    socket boundary. Live readiness (`is_live_ready`) therefore remains gated OFF until
+    HTTP-boundary pacing is verified.
+    """
+
+    HTTP_BOUNDARY_PACING_UNVERIFIED: bool = True
 
     def __init__(
         self,

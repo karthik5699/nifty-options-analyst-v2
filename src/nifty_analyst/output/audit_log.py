@@ -51,6 +51,8 @@ def append_immutable_audit_record(
     verdict = state.final_output.verdict if state.final_output else "INSUFFICIENT DATA"
     record_body: dict[str, Any] = {
         "run_id": state.run_metadata.run_id,
+        "snapshot_id": state.run_metadata.snapshot_id,
+        "evidence_sha256": state.run_metadata.evidence_sha256,
         "decision_timestamp_ist": state.run_metadata.decision_timestamp_ist,
         "mode": state.run_metadata.mode,
         "data_version_hash": state.run_metadata.data_version_hash,

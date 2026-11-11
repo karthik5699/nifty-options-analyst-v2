@@ -58,6 +58,8 @@ def evaluate_part_a_rules(
     volatility: VolatilityEvidence,
     config: AnalystConfig,
     proposes_automatic_rule_change: bool = False,
+    full_size_fill_supported: bool = True,
+    price_assumption_label: str = "",
 ) -> tuple[dict[str, PartARuleCheck], RuleStatus]:
     """Evaluate all 10 binding Part A rules deterministically."""
     checks: dict[str, PartARuleCheck] = {}
@@ -122,19 +124,43 @@ def evaluate_part_a_rules(
     )
 
     # Rule 4: Rs 10,000 per-trade contractual maximum loss ceiling (STT excluded per trader directive)
-    r4_pass = (
-        math.isfinite(contractual_max_loss_rs)
-        and contractual_max_loss_rs <= config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
-    )
+    # Never certify PASS from an unsupported full-size touch fill assumption (Item 4).
+    if not full_size_fill_supported:
+        if (
+            math.isfinite(contractual_max_loss_rs)
+            and contractual_max_loss_rs > config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
+        ):
+            r4_status: RuleStatus = "FAIL"
+            r4_ev = (
+                f"INDICATIVE touch bound already exceeds ceiling (Rs {contractual_max_loss_rs:.2f} > "
+                f"Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}), and visible depth does "
+                f"not cover planned quantity ({price_assumption_label or 'INDICATIVE_TOUCH_ONLY'})."
+            )
+        else:
+            r4_status = "UNKNOWN"
+            r4_ev = (
+                f"UNSUPPORTED_FULL_SIZE_FILL: displayed touch / visible depth cannot fill planned "
+                f"quantity; refusing to certify Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f} "
+                f"ceiling from indicative touch bound Rs {contractual_max_loss_rs:.2f} "
+                f"({price_assumption_label or 'INDICATIVE_TOUCH_ONLY'})."
+            )
+    else:
+        r4_pass = (
+            math.isfinite(contractual_max_loss_rs)
+            and contractual_max_loss_rs <= config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
+        )
+        r4_status = "PASS" if r4_pass else "FAIL"
+        r4_ev = (
+            f"contractual_max_loss_rs = Rs {contractual_max_loss_rs:.2f} vs ceiling "
+            f"Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}"
+            + (f" [{price_assumption_label}]." if price_assumption_label else ".")
+        )
     checks["RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS"] = PartARuleCheck(
         rule_id="RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
         rule_name="Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff bound)",
         source_date="6 Nov 2026",
-        status="PASS" if r4_pass else "FAIL",
-        evidence=(
-            f"contractual_max_loss_rs = Rs {contractual_max_loss_rs:.2f} vs ceiling "
-            f"Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}."
-        ),
+        status=r4_status,
+        evidence=r4_ev,
     )
 
     # Rule 5: Expiry risk (26 Oct 2026) - leg-by-leg applicability on short legs at <= 1 DTE

@@ -75,7 +75,7 @@ _IDENTIFIER_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 # Regex patterns for Indian PAN, 10-digit mobile numbers, Bearer tokens, and long hex/base64 tokens
 _PAN_RE = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")
-_INDIAN_MOBILE_RE = re.compile(r"(?<![0-9])(?:\+91[\-\s]?)?[6-9][0-9]{9}(?![0-9])")
+_INDIAN_MOBILE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\+91[\-\s]?)?[6-9][0-9]{9}(?![A-Za-z0-9])")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*")
 _LONG_TOKEN_RE = re.compile(r"\b(?:sk-|ghp_|gho_|agy-h-|eyJ)[A-Za-z0-9\-._~+/]{10,}\b")
 

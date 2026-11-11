@@ -10,13 +10,16 @@ HARD CONSTRAINTS (Prompt & Section 10):
 from __future__ import annotations
 
 import abc
+import dataclasses
+import datetime as dt
 import json
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from nifty_analyst.config import AnalystConfig
+from nifty_analyst.scrubber import IST, ensure_ist
 from nifty_analyst.state import (
     CandidateStructure,
     ConsolidatorState,
@@ -24,11 +27,21 @@ from nifty_analyst.state import (
     NiftyOptionsState,
     RiskTriadState,
 )
+from nifty_analyst.synthesis.evidence_snapshot import (
+    SnapshotTamperOrMismatchError,
+    compute_state_evidence_sha256,
+    has_existing_snapshot_for_artifact,
+    load_and_verify_snapshot_for_resume,
+    mint_unique_capture_identities,
+    persist_immutable_snapshot_bundle,
+    snapshot_paths_for_artifact,
+)
 from nifty_analyst.synthesis.personas import (
     PERSONA_DEFINITIONS,
     build_compact_desk_brief,
     build_deterministic_personas,
     build_single_pass_persona_prompt,
+    is_pre_llm_live_ready_eligible,
     parse_optional_persona_states,
 )
 
@@ -215,15 +228,17 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
         else:
             challenge_note = "None. All Part A rules and Part B style heuristics are consistent on this snapshot."
 
-        if (
-            chosen is not None
-            and vol.ivp_30d != "UNKNOWN"
-            and vol.ivp_90d != "UNKNOWN"
-            and chosen.part_a_overall_status == "PASS"
-        ):
+        if is_pre_llm_live_ready_eligible(state, chosen):
             conf_note = (
                 f"LIVE-READY ({consolidator.conviction} conviction; IVP verified and all Part A checks PASS)."
             )
+        elif state.run_metadata.mode == "LIVE_MORNING_SNAPSHOT":
+            conf_note = (
+                "RESEARCH-ONLY: Live readiness gates remain OFF (unverified exchange quote timestamps, "
+                "single-expiry / held-contract surface coverage, and HTTP-boundary 2.5s pacing)."
+            )
+        elif state.portfolio_exposure_state.portfolio_state_status != "VERIFIED":
+            conf_note = "RESEARCH-ONLY: Portfolio open-position state is UNKNOWN (fail-closed)."
         elif vol.ivp_30d == "UNKNOWN" or vol.ivp_90d == "UNKNOWN":
             conf_note = (
                 "RESEARCH-ONLY: Verified historical IVP is UNKNOWN; output cannot be "
@@ -391,18 +406,21 @@ class HostedBudgetGuardedLLMProvider(LLMProvider):
 class AgentArtifactSynthesisProvider(LLMProvider):
     """External single-pass synthesis seam for the WhatsApp / operator LLM agent.
 
-    1. Exports `<artifact>.request.json` containing `compact_desk_brief`,
-       `persona_instructions` (Bull / Bear / Vol Debate, Risk Triad, Consolidator),
-       `single_pass_prompt`, and `sanitised_state` bound to `run_id` + `decision_timestamp_ist`.
-    2. Reads the single JSON artifact written by the WhatsApp LLM agent, validates run binding
-       and citations, and parses both the core synthesis fields and optional `debate_state`,
-       `risk_triad`, and `consolidator` blocks (zero multicall, zero paid API spend).
+    1. Persists write-once `<artifact>.snapshot.json`, `<artifact>.request.json`, and an
+       independent target pin record (`O_CREAT | O_EXCL`, `0o444`) bound to `snapshot_id`,
+       `evidence_sha256`, `run_id`, `decision_timestamp_ist`, and `capture_started_at_ist`.
+       Never overwrites an existing request or snapshot file when checking for an artifact.
+    2. Enforces the 180-second limit from actual `capture_started_at_ist` through resume,
+       recomputes and verifies `evidence_sha256`, and requires `snapshot_id` + `evidence_sha256`
+       in the returned synthesis artifact (zero multicall, zero paid API spend).
     """
 
     REQUIRED_KEYS = {
         "model_id",
         "run_id",
         "decision_timestamp_ist",
+        "snapshot_id",
+        "evidence_sha256",
         "reasoning_summary",
         "habitual_comparison_note",
         "research_rule_challenge_note",
@@ -410,8 +428,17 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         "citations",
     }
 
-    def __init__(self, artifact_path: str) -> None:
+    def __init__(
+        self,
+        artifact_path: str,
+        max_age_seconds: float = 180.0,
+        registry_root: str | Path | None = None,
+        wall_clock_fn: Callable[[], dt.datetime] | None = None,
+    ) -> None:
         self.artifact_path = artifact_path
+        self.max_age_seconds = float(max_age_seconds)
+        self.registry_root = Path(registry_root) if registry_root else None
+        self._wall_clock_fn = wall_clock_fn or (lambda: dt.datetime.now(tz=IST))
 
     def synthesize(
         self,
@@ -427,30 +454,96 @@ class AgentArtifactSynthesisProvider(LLMProvider):
                 "(agent_synthesis_artifact_path) to be set"
             )
         p = Path(self.artifact_path)
-        run_id = state.run_metadata.run_id
-        decision_ts = state.run_metadata.decision_timestamp_ist
-        desk_brief = build_compact_desk_brief(state)
+        now_ist = self._wall_clock_fn()
+        _, request_path, _, _ = snapshot_paths_for_artifact(p, self.registry_root)
 
-        request_path = p.with_name(p.name + ".request.json")
-        request_path.parent.mkdir(parents=True, exist_ok=True)
-        request_path.write_text(
-            json.dumps(
-                {
-                    "run_id": run_id,
-                    "decision_timestamp_ist": decision_ts,
-                    "compact_desk_brief": desk_brief,
-                    "persona_instructions": PERSONA_DEFINITIONS,
-                    "single_pass_prompt": build_single_pass_persona_prompt(desk_brief),
-                    "sanitised_state": json.loads(sanitised_state_json),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        if not has_existing_snapshot_for_artifact(p, self.registry_root):
+            # Standalone provider invocation where pipeline has not yet persisted the bundle:
+            # mint missing capture clocks/identities if absent and write once (`O_CREAT | O_EXCL`).
+            meta = state.run_metadata
+            cap_start = meta.capture_started_at_ist or ensure_ist(now_ist).isoformat()
+            cap_end = meta.capture_completed_at_ist or cap_start
+            stamped_meta = dataclasses.replace(
+                meta,
+                capture_started_at_ist=cap_start,
+                capture_completed_at_ist=cap_end,
+            )
+            stamped_state = dataclasses.replace(state, run_metadata=stamped_meta)
+            _, ev_sha = compute_state_evidence_sha256(stamped_state)
+            if not stamped_meta.snapshot_id or stamped_meta.evidence_sha256 != ev_sha:
+                dec_dt = dt.datetime.fromisoformat(stamped_meta.decision_timestamp_ist)
+                cap_dt = dt.datetime.fromisoformat(cap_start)
+                minted_run_id, minted_snap_id = mint_unique_capture_identities(
+                    dec_dt, cap_dt, stamped_meta.config_hash, ev_sha
+                )
+                stamped_meta = dataclasses.replace(
+                    stamped_meta,
+                    run_id=stamped_meta.run_id or minted_run_id,
+                    snapshot_id=stamped_meta.snapshot_id or minted_snap_id,
+                    evidence_sha256=ev_sha,
+                )
+                stamped_state = dataclasses.replace(state, run_metadata=stamped_meta)
+
+            desk_brief = build_compact_desk_brief(stamped_state)
+            req_payload = {
+                "run_id": stamped_state.run_metadata.run_id,
+                "snapshot_id": stamped_state.run_metadata.snapshot_id,
+                "evidence_sha256": stamped_state.run_metadata.evidence_sha256,
+                "decision_timestamp_ist": stamped_state.run_metadata.decision_timestamp_ist,
+                "capture_started_at_ist": stamped_state.run_metadata.capture_started_at_ist,
+                "capture_completed_at_ist": stamped_state.run_metadata.capture_completed_at_ist,
+                "max_resume_age_seconds": self.max_age_seconds,
+                "compact_desk_brief": desk_brief,
+                "persona_instructions": PERSONA_DEFINITIONS,
+                "single_pass_prompt": build_single_pass_persona_prompt(desk_brief),
+                "sanitised_state": (
+                    json.loads(sanitised_state_json)
+                    if sanitised_state_json
+                    else stamped_state.to_dict()
+                ),
+            }
+            persist_immutable_snapshot_bundle(
+                artifact_path=p,
+                state=stamped_state,
+                request_payload=req_payload,
+                registry_root=self.registry_root,
+            )
+
+        # Always verify against the immutable stored snapshot + pin + 180s capture-start clock
+        loaded = load_and_verify_snapshot_for_resume(
+            artifact_path=p,
+            resume_now_dt=now_ist,
+            max_age_seconds=self.max_age_seconds,
+            registry_root=self.registry_root,
         )
+
+        # Verify caller-supplied `state` matches the pinned snapshot (never synthesize over changed data)
+        _, caller_sha = compute_state_evidence_sha256(
+            state, chain_provenance=loaded.chain_provenance
+        )
+        if (
+            state.run_metadata.run_id != loaded.run_id
+            or state.run_metadata.decision_timestamp_ist
+            != loaded.pre_llm_state.run_metadata.decision_timestamp_ist
+            or (
+                state.run_metadata.snapshot_id
+                and state.run_metadata.snapshot_id != loaded.snapshot_id
+            )
+            or caller_sha != loaded.evidence_sha256
+        ):
+            raise SnapshotTamperOrMismatchError(
+                f"stale or foreign artifact: pinned snapshot is "
+                f"{loaded.snapshot_id!r}/{loaded.run_id!r}/"
+                f"{loaded.pre_llm_state.run_metadata.decision_timestamp_ist!r} "
+                f"(sha256={loaded.evidence_sha256[:16]}), caller passed "
+                f"{state.run_metadata.snapshot_id!r}/{state.run_metadata.run_id!r}/"
+                f"{state.run_metadata.decision_timestamp_ist!r} (sha256={caller_sha[:16]})"
+            )
+
         if not p.is_file():
             raise FileNotFoundError(
-                f"agent synthesis artifact not found: {p}; request for run {run_id} "
-                f"exported to {request_path}"
+                f"agent synthesis artifact not found: {p}; immutable snapshot "
+                f"{loaded.snapshot_id} and request for run {loaded.run_id} exported to {request_path}"
             )
         payload = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -458,11 +551,19 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         missing = self.REQUIRED_KEYS - set(payload)
         if missing:
             raise ValueError(f"agent synthesis artifact missing keys: {sorted(missing)}")
-        if payload["run_id"] != run_id or payload["decision_timestamp_ist"] != decision_ts:
-            raise ValueError(
-                f"stale or foreign artifact: bound to run "
-                f"{payload['run_id']!r}/{payload['decision_timestamp_ist']!r}, "
-                f"current run is {run_id!r}/{decision_ts!r}"
+        if (
+            payload["run_id"] != loaded.run_id
+            or payload["decision_timestamp_ist"]
+            != loaded.pre_llm_state.run_metadata.decision_timestamp_ist
+            or payload["snapshot_id"] != loaded.snapshot_id
+            or payload["evidence_sha256"] != loaded.evidence_sha256
+        ):
+            raise SnapshotTamperOrMismatchError(
+                f"stale or foreign artifact: bound to "
+                f"run={payload['run_id']!r}, ts={payload['decision_timestamp_ist']!r}, "
+                f"snapshot_id={payload['snapshot_id']!r}, sha256={str(payload['evidence_sha256'])[:16]!r}; "
+                f"expected run={loaded.run_id!r}, ts={loaded.pre_llm_state.run_metadata.decision_timestamp_ist!r}, "
+                f"snapshot_id={loaded.snapshot_id!r}, sha256={loaded.evidence_sha256[:16]!r}"
             )
         citations = payload["citations"]
         if not isinstance(citations, list) or any(
@@ -474,8 +575,14 @@ class AgentArtifactSynthesisProvider(LLMProvider):
                 "claim_text and state_field_path"
             )
 
-        eligible = [c for c in state.candidate_structures if c.part_a_overall_status == "PASS"]
-        fb_deb, fb_triad, fb_cons, _ = build_deterministic_personas(state, primary, eligible)
+        eligible = [
+            c
+            for c in loaded.pre_llm_state.candidate_structures
+            if c.part_a_overall_status == "PASS" and c.full_size_fill_supported
+        ]
+        fb_deb, fb_triad, fb_cons, _ = build_deterministic_personas(
+            loaded.pre_llm_state, primary, eligible
+        )
         deb, triad, cons = parse_optional_persona_states(
             payload, fb_deb, fb_triad, fb_cons
         )
@@ -495,11 +602,27 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         )
 
 
-def build_llm_provider(config: AnalystConfig) -> LLMProvider:
+def _resolve_snapshot_registry_root(config: AnalystConfig) -> Path | None:
+    if config.cache_dir:
+        return Path(config.cache_dir) / "snapshot_registry"
+    if config.audit_log_path:
+        return Path(config.audit_log_path).parent / ".snapshot_registry"
+    return None
+
+
+def build_llm_provider(
+    config: AnalystConfig,
+    wall_clock_fn: Callable[[], dt.datetime] | None = None,
+) -> LLMProvider:
     if config.llm_provider == "hosted_api":
         return HostedBudgetGuardedLLMProvider(config)
     if config.llm_provider in ("ollama", "vllm"):
         return LocalEndpointLLMProvider(config.llm_endpoint_url, config.llm_model_id)
     if config.llm_provider == "agent_artifact":
-        return AgentArtifactSynthesisProvider(config.agent_synthesis_artifact_path)
+        return AgentArtifactSynthesisProvider(
+            config.agent_synthesis_artifact_path,
+            max_age_seconds=float(config.max_quote_staleness_seconds),
+            registry_root=_resolve_snapshot_registry_root(config),
+            wall_clock_fn=wall_clock_fn,
+        )
     return OfflineDeterministicSynthesisProvider(model_id="deterministic-persona-synthesizer-v4")

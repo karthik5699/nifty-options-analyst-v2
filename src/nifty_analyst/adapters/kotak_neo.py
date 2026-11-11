@@ -71,6 +71,8 @@ class ChainSnapshotEnvelope:
     source_verification_tag: str
     lot_size: int | None = None
     rejected_depth_books: list[dict[str, Any]] = field(default_factory=list)
+    priced_neo_symbols: list[str] = field(default_factory=list)
+    chain_neo_symbols: list[str] = field(default_factory=list)
 
 
 class ProvisionalSerialRateLimiter:
@@ -183,7 +185,39 @@ class FixtureKotakNeoAdapter(KotakNeoReadOnlyPort):
             all_chains = json.loads(path.read_text(encoding="utf-8"))
             if expiry_date not in all_chains.get("chains_by_expiry", {}):
                 raise KotakAdapterError(f"Expiry {expiry_date} not found in option_chains.json")
-            self._cache[cache_key] = all_chains["chains_by_expiry"][expiry_date]
+            chain_copy = json.loads(json.dumps(all_chains["chains_by_expiry"][expiry_date]))
+            lot_sz = int(chain_copy.get("lot_size") or 0)
+            if lot_sz <= 0:
+                master_path = self.fixtures_dir / "contract_master.json"
+                if master_path.exists():
+                    master_obj = json.loads(master_path.read_text(encoding="utf-8"))
+                    for exp_row in master_obj.get("expiries", []):
+                        if str(exp_row.get("expiry_date")) == expiry_date:
+                            lot_sz = int(exp_row.get("lot_size") or 0)
+                            break
+            if lot_sz <= 0:
+                lot_sz = 75
+            chain_copy.setdefault("lot_size", lot_sz)
+            for st_row in chain_copy.get("strikes", []):
+                c_lots = int(st_row.get("call_depth_lots", 10))
+                p_lots = int(st_row.get("put_depth_lots", 10))
+                c_qty = max(0, c_lots * lot_sz)
+                p_qty = max(0, p_lots * lot_sz)
+                if st_row.get("call_bid") and st_row.get("call_ask") and c_qty > 0:
+                    st_row.setdefault("call_touch_bid_qty", c_qty)
+                    st_row.setdefault("call_touch_ask_qty", c_qty)
+                    st_row.setdefault("call_visible_buy_qty", c_qty)
+                    st_row.setdefault("call_visible_sell_qty", c_qty)
+                    st_row.setdefault("call_buy_levels", [[float(st_row["call_bid"]), c_qty]])
+                    st_row.setdefault("call_sell_levels", [[float(st_row["call_ask"]), c_qty]])
+                if st_row.get("put_bid") and st_row.get("put_ask") and p_qty > 0:
+                    st_row.setdefault("put_touch_bid_qty", p_qty)
+                    st_row.setdefault("put_touch_ask_qty", p_qty)
+                    st_row.setdefault("put_visible_buy_qty", p_qty)
+                    st_row.setdefault("put_visible_sell_qty", p_qty)
+                    st_row.setdefault("put_buy_levels", [[float(st_row["put_bid"]), p_qty]])
+                    st_row.setdefault("put_sell_levels", [[float(st_row["put_ask"]), p_qty]])
+            self._cache[cache_key] = chain_copy
         return self._cache[cache_key]
 
     def fetch_index_candles_raw(self, decision_dt_ist: dt.datetime) -> dict[str, Any]:
@@ -319,6 +353,22 @@ def parse_and_validate_option_chain(
         c_exec = c_bid is not None and c_ask is not None
         p_exec = p_bid is not None and p_ask is not None
 
+        def _opt_int(key: str, active: bool) -> int | None:
+            v = item.get(key)
+            return int(v) if (active and v is not None) else None
+
+        def _opt_levels(key: str, active: bool) -> tuple[tuple[float, int], ...]:
+            if not active:
+                return ()
+            raw_lvls = item.get(key)
+            if not isinstance(raw_lvls, (list, tuple)):
+                return ()
+            out_lvls: list[tuple[float, int]] = []
+            for r in raw_lvls:
+                if isinstance(r, (list, tuple)) and len(r) >= 2:
+                    out_lvls.append((float(r[0]), int(r[1])))
+            return tuple(out_lvls)
+
         parsed_quotes.append(
             RawStrikeQuote(
                 strike=strike_val,
@@ -334,26 +384,22 @@ def parse_and_validate_option_chain(
                 put_depth_lots=int(item.get("put_depth_lots", 10)) if p_exec else 0,
                 quote_timestamp_ist=quote_dt.isoformat(),
                 expiry_date=expiry_date,
-                call_bid_depth_lots=(
-                    int(item["call_bid_depth_lots"])
-                    if (c_exec and item.get("call_bid_depth_lots") is not None)
-                    else None
-                ),
-                call_ask_depth_lots=(
-                    int(item["call_ask_depth_lots"])
-                    if (c_exec and item.get("call_ask_depth_lots") is not None)
-                    else None
-                ),
-                put_bid_depth_lots=(
-                    int(item["put_bid_depth_lots"])
-                    if (p_exec and item.get("put_bid_depth_lots") is not None)
-                    else None
-                ),
-                put_ask_depth_lots=(
-                    int(item["put_ask_depth_lots"])
-                    if (p_exec and item.get("put_ask_depth_lots") is not None)
-                    else None
-                ),
+                call_bid_depth_lots=_opt_int("call_bid_depth_lots", c_exec),
+                call_ask_depth_lots=_opt_int("call_ask_depth_lots", c_exec),
+                put_bid_depth_lots=_opt_int("put_bid_depth_lots", p_exec),
+                put_ask_depth_lots=_opt_int("put_ask_depth_lots", p_exec),
+                call_touch_bid_qty=_opt_int("call_touch_bid_qty", c_exec),
+                call_touch_ask_qty=_opt_int("call_touch_ask_qty", c_exec),
+                put_touch_bid_qty=_opt_int("put_touch_bid_qty", p_exec),
+                put_touch_ask_qty=_opt_int("put_touch_ask_qty", p_exec),
+                call_visible_buy_qty=_opt_int("call_visible_buy_qty", c_exec),
+                call_visible_sell_qty=_opt_int("call_visible_sell_qty", c_exec),
+                put_visible_buy_qty=_opt_int("put_visible_buy_qty", p_exec),
+                put_visible_sell_qty=_opt_int("put_visible_sell_qty", p_exec),
+                call_buy_levels=_opt_levels("call_buy_levels", c_exec),
+                call_sell_levels=_opt_levels("call_sell_levels", c_exec),
+                put_buy_levels=_opt_levels("put_buy_levels", p_exec),
+                put_sell_levels=_opt_levels("put_sell_levels", p_exec),
             )
         )
 
@@ -366,6 +412,8 @@ def parse_and_validate_option_chain(
     raw_lot = raw_chain.get("lot_size")
     chain_lot = int(raw_lot) if (raw_lot is not None and int(raw_lot) > 0) else None
     rejected_books = list(raw_chain.get("rejected_depth_books") or [])
+    priced_neos = [str(s) for s in (raw_chain.get("priced_neo_symbols") or [])]
+    chain_neos = [str(s) for s in (raw_chain.get("chain_neo_symbols") or [])]
 
     return ChainSnapshotEnvelope(
         expiry_date=expiry_date,
@@ -377,6 +425,8 @@ def parse_and_validate_option_chain(
         source_verification_tag=tag,
         lot_size=chain_lot,
         rejected_depth_books=rejected_books,
+        priced_neo_symbols=priced_neos,
+        chain_neo_symbols=chain_neos,
     )
 
 
@@ -1091,12 +1141,46 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
 
         resolved_contract_lots: set[int] = set()
         rejected_depth_books: list[dict[str, Any]] = []
+        priced_neo_symbols: list[str] = []
+        all_chain_neo_symbols: list[str] = []
         strikes: list[dict[str, Any]] = []
+
+        _EMPTY_EXT: dict[str, Any] = {
+            "touch_bid_qty": None,
+            "touch_ask_qty": None,
+            "visible_buy_qty": None,
+            "visible_sell_qty": None,
+            "buy_levels": [],
+            "sell_levels": [],
+            "quote_response_ts_candidates": {},
+        }
+
+        def _extract_quote_ts_candidates(q_obj: dict[str, Any] | None) -> dict[str, str]:
+            if not isinstance(q_obj, dict):
+                return {}
+            found_ts: dict[str, str] = {}
+            for k_ts in (
+                "exchange_timestamp_ist",
+                "exchange_timestamp",
+                "last_traded_time",
+                "lstup_time",
+                "lut",
+                "fdtm",
+                "quote_updated_at",
+                "updated_at",
+                "timestamp",
+            ):
+                val_ts = q_obj.get(k_ts)
+                if val_ts is not None and str(val_ts).strip():
+                    found_ts[k_ts] = str(val_ts).strip()
+            return found_ts
 
         def _resolve_leg_book(
             leg: dict[str, Any], strike_val: float, opt_type: str
-        ) -> tuple[float | None, float | None, int, int | None, int | None, bool]:
+        ) -> tuple[float | None, float | None, int, int | None, int | None, bool, dict[str, Any]]:
             ns = str(leg.get("neo_symbol") or "").strip()
+            if ns and "|" in ns:
+                all_chain_neo_symbols.append(ns)
             tok_only = ns.split("|", 1)[1].strip() if "|" in ns else ""
 
             if ns and ns in shortlisted_set:
@@ -1111,12 +1195,14 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             "raw_payload": None,
                         }
                     )
-                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
                 q_payload = quotes_map.get(ns) or (quotes_map.get(tok_only) if tok_only else None)
                 if q_payload is not None or quotes_map:
                     parsed_book = interpret_depth_book(q_payload, fallback_lot_size=expiry_lot_size)
-                    if parsed_book.is_executable:
+                    q_ts_cands = _extract_quote_ts_candidates(q_payload)
+                    if parsed_book.is_structurally_valid:
                         resolved_contract_lots.add(parsed_book.resolved_lot_size)
+                        priced_neo_symbols.append(ns)
                         b_lots = parsed_book.bid_depth_lots or 0
                         a_lots = parsed_book.ask_depth_lots or 0
                         conservative_lots = min(b_lots, a_lots) if (b_lots and a_lots) else (b_lots or a_lots)
@@ -1127,6 +1213,15 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             parsed_book.bid_depth_lots,
                             parsed_book.ask_depth_lots,
                             False,
+                            {
+                                "touch_bid_qty": parsed_book.touch_bid_qty,
+                                "touch_ask_qty": parsed_book.touch_ask_qty,
+                                "visible_buy_qty": parsed_book.visible_buy_qty,
+                                "visible_sell_qty": parsed_book.visible_sell_qty,
+                                "buy_levels": [[p, q] for p, q in parsed_book.buy_levels],
+                                "sell_levels": [[p, q] for p, q in parsed_book.sell_levels],
+                                "quote_response_ts_candidates": q_ts_cands,
+                            },
                         )
                     rejected_depth_books.append(
                         {
@@ -1138,7 +1233,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             "raw_payload": parsed_book.raw_payload,
                         }
                     )
-                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
 
             # Support synthetic unit-test chain payloads that embed pre-normalized `market_depth` / `depth`
             inline_md = leg.get("market_depth") or leg.get("depth")
@@ -1148,8 +1243,10 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                         {"depth": inline_md, "mktLot": expiry_lot_size},
                         fallback_lot_size=expiry_lot_size,
                     )
-                    if parsed_inline.is_executable:
+                    if parsed_inline.is_structurally_valid:
                         resolved_contract_lots.add(parsed_inline.resolved_lot_size)
+                        if ns:
+                            priced_neo_symbols.append(ns)
                         b_l = parsed_inline.bid_depth_lots or 0
                         a_l = parsed_inline.ask_depth_lots or 0
                         return (
@@ -1159,6 +1256,15 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             parsed_inline.bid_depth_lots,
                             parsed_inline.ask_depth_lots,
                             False,
+                            {
+                                "touch_bid_qty": parsed_inline.touch_bid_qty,
+                                "touch_ask_qty": parsed_inline.touch_ask_qty,
+                                "visible_buy_qty": parsed_inline.visible_buy_qty,
+                                "visible_sell_qty": parsed_inline.visible_sell_qty,
+                                "buy_levels": [[p, q] for p, q in parsed_inline.buy_levels],
+                                "sell_levels": [[p, q] for p, q in parsed_inline.sell_levels],
+                                "quote_response_ts_candidates": {},
+                            },
                         )
                     rejected_depth_books.append(
                         {
@@ -1170,37 +1276,49 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             "raw_payload": parsed_inline.raw_payload,
                         }
                     )
-                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
 
                 b_val, a_val = _coerce_executable_pair(
                     inline_md.get("best_bid"), inline_md.get("best_ask"), False
                 )
                 if b_val is not None and a_val is not None:
                     lot_div = expiry_lot_size if expiry_lot_size > 0 else 1
+                    vis_b = int(inline_md["total_buy_qty"]) if inline_md.get("total_buy_qty") is not None else None
+                    vis_s = int(inline_md["total_sell_qty"]) if inline_md.get("total_sell_qty") is not None else None
                     buy_lots = (
                         int(inline_md["total_buy_qty_lots"])
                         if inline_md.get("total_buy_qty_lots") is not None
-                        else (
-                            int(inline_md["total_buy_qty"]) // lot_div
-                            if inline_md.get("total_buy_qty") is not None and expiry_lot_size > 0
-                            else None
-                        )
+                        else (vis_b // lot_div if vis_b is not None and expiry_lot_size > 0 else None)
                     )
                     sell_lots = (
                         int(inline_md["total_sell_qty_lots"])
                         if inline_md.get("total_sell_qty_lots") is not None
-                        else (
-                            int(inline_md["total_sell_qty"]) // lot_div
-                            if inline_md.get("total_sell_qty") is not None and expiry_lot_size > 0
-                            else None
-                        )
+                        else (vis_s // lot_div if vis_s is not None and expiry_lot_size > 0 else None)
                     )
                     d_lots = (
                         min(buy_lots, sell_lots)
                         if (buy_lots is not None and sell_lots is not None)
                         else int(buy_lots or sell_lots or 0)
                     )
-                    return b_val, a_val, d_lots, buy_lots, sell_lots, False
+                    # Summary-only inline quote has no level array: touch_bid_qty/touch_ask_qty stay None
+                    # so full-size touch fill is never assumed without level-by-level depth evidence.
+                    return (
+                        b_val,
+                        a_val,
+                        d_lots,
+                        buy_lots,
+                        sell_lots,
+                        False,
+                        {
+                            "touch_bid_qty": None,
+                            "touch_ask_qty": None,
+                            "visible_buy_qty": vis_b,
+                            "visible_sell_qty": vis_s,
+                            "buy_levels": [],
+                            "sell_levels": [],
+                            "quote_response_ts_candidates": {},
+                        },
+                    )
 
                 rejected_depth_books.append(
                     {
@@ -1214,7 +1332,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 )
 
             # Unfetched or LTP-only strike: NEVER substitute LTP or 0.0 as bid/ask.
-            return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+            return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
 
         for row in strikes_raw:
             strike_val = float(row.get("strike_price") or 0.0)
@@ -1236,12 +1354,15 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 if v:
                     ts_candidates[cand] = str(v)
 
-            c_bid, c_ask, c_lots, c_b_lots, c_a_lots, ce_ltp_only = _resolve_leg_book(
+            c_bid, c_ask, c_lots, c_b_lots, c_a_lots, ce_ltp_only, c_ext = _resolve_leg_book(
                 ce, strike_val, "CE"
             )
-            p_bid, p_ask, p_lots, p_b_lots, p_a_lots, pe_ltp_only = _resolve_leg_book(
+            p_bid, p_ask, p_lots, p_b_lots, p_a_lots, pe_ltp_only, p_ext = _resolve_leg_book(
                 pe, strike_val, "PE"
             )
+            for side_lbl, ext_ts in (("CE_quote", c_ext["quote_response_ts_candidates"]), ("PE_quote", p_ext["quote_response_ts_candidates"])):
+                for k_ts, v_ts in ext_ts.items():
+                    ts_candidates[f"{side_lbl}.{k_ts}"] = v_ts
 
             strikes.append(
                 {
@@ -1260,6 +1381,18 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     "call_ask_depth_lots": c_a_lots,
                     "put_bid_depth_lots": p_b_lots,
                     "put_ask_depth_lots": p_a_lots,
+                    "call_touch_bid_qty": c_ext["touch_bid_qty"],
+                    "call_touch_ask_qty": c_ext["touch_ask_qty"],
+                    "put_touch_bid_qty": p_ext["touch_bid_qty"],
+                    "put_touch_ask_qty": p_ext["touch_ask_qty"],
+                    "call_visible_buy_qty": c_ext["visible_buy_qty"],
+                    "call_visible_sell_qty": c_ext["visible_sell_qty"],
+                    "put_visible_buy_qty": p_ext["visible_buy_qty"],
+                    "put_visible_sell_qty": p_ext["visible_sell_qty"],
+                    "call_buy_levels": c_ext["buy_levels"],
+                    "call_sell_levels": c_ext["sell_levels"],
+                    "put_buy_levels": p_ext["buy_levels"],
+                    "put_sell_levels": p_ext["sell_levels"],
                     "call_ltp_only": ce_ltp_only,
                     "put_ltp_only": pe_ltp_only,
                     "update_time_ist": dec_ist.isoformat(),
@@ -1281,6 +1414,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             "verification_tag": "UNVERIFIED_KOTAK_SCHEMA",
             "lot_size": final_lot_size if final_lot_size > 0 else None,
             "shortlisted_neo_symbols": shortlisted_neos,
+            "priced_neo_symbols": priced_neo_symbols,
+            "chain_neo_symbols": all_chain_neo_symbols,
             "rejected_depth_books": rejected_depth_books,
             "strikes": strikes,
         }

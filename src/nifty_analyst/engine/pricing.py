@@ -329,9 +329,22 @@ class RawStrikeQuote:
     call_ask_depth_lots: int | None = None
     put_bid_depth_lots: int | None = None
     put_ask_depth_lots: int | None = None
+    call_touch_bid_qty: int | None = None
+    call_touch_ask_qty: int | None = None
+    put_touch_bid_qty: int | None = None
+    put_touch_ask_qty: int | None = None
+    call_visible_buy_qty: int | None = None
+    call_visible_sell_qty: int | None = None
+    put_visible_buy_qty: int | None = None
+    put_visible_sell_qty: int | None = None
+    call_buy_levels: tuple[tuple[float, int], ...] = ()
+    call_sell_levels: tuple[tuple[float, int], ...] = ()
+    put_buy_levels: tuple[tuple[float, int], ...] = ()
+    put_sell_levels: tuple[tuple[float, int], ...] = ()
 
     @property
     def has_executable_call(self) -> bool:
+        """Structural touch usability (`0 < call_bid < call_ask`). Does not imply full-size fill."""
         return (
             self.call_bid is not None
             and self.call_ask is not None
@@ -339,12 +352,21 @@ class RawStrikeQuote:
         )
 
     @property
+    def has_usable_call_touch(self) -> bool:
+        return self.has_executable_call
+
+    @property
     def has_executable_put(self) -> bool:
+        """Structural touch usability (`0 < put_bid < put_ask`). Does not imply full-size fill."""
         return (
             self.put_bid is not None
             and self.put_ask is not None
             and 0.0 < self.put_bid < self.put_ask
         )
+
+    @property
+    def has_usable_put_touch(self) -> bool:
+        return self.has_executable_put
 
     @property
     def has_both_executable(self) -> bool:
@@ -363,7 +385,7 @@ class RawStrikeQuote:
         return 0.5 * (self.put_bid + self.put_ask)
 
     def depth_lots_for(self, option_type: OptionType, side: Literal["LONG", "SHORT"]) -> int:
-        """Return executable top-of-book depth for the active order side (LONG lifts ask; SHORT hits bid)."""
+        """Return visible book depth in lots for the active order side (LONG lifts ask; SHORT hits bid)."""
         if option_type == "CE":
             if not self.has_executable_call:
                 return 0
@@ -379,6 +401,38 @@ class RawStrikeQuote:
         if side == "SHORT" and self.put_bid_depth_lots is not None:
             return self.put_bid_depth_lots
         return self.put_depth_lots
+
+    def touch_qty_for(self, option_type: OptionType, side: Literal["LONG", "SHORT"]) -> int | None:
+        """Return actual units available at the displayed touch (`best_ask` for LONG, `best_bid` for SHORT)."""
+        if option_type == "CE":
+            if not self.has_executable_call:
+                return None
+            return self.call_touch_ask_qty if side == "LONG" else self.call_touch_bid_qty
+        if not self.has_executable_put:
+            return None
+        return self.put_touch_ask_qty if side == "LONG" else self.put_touch_bid_qty
+
+    def visible_qty_for(self, option_type: OptionType, side: Literal["LONG", "SHORT"]) -> int | None:
+        """Return total visible book units summed across quoted levels on the active side."""
+        if option_type == "CE":
+            if not self.has_executable_call:
+                return None
+            return self.call_visible_sell_qty if side == "LONG" else self.call_visible_buy_qty
+        if not self.has_executable_put:
+            return None
+        return self.put_visible_sell_qty if side == "LONG" else self.put_visible_buy_qty
+
+    def levels_for(
+        self, option_type: OptionType, side: Literal["LONG", "SHORT"]
+    ) -> tuple[tuple[float, int], ...]:
+        """Return ordered `(price, quantity)` depth levels on the active side (`sell` for LONG, `buy` for SHORT)."""
+        if option_type == "CE":
+            if not self.has_executable_call:
+                return ()
+            return self.call_sell_levels if side == "LONG" else self.call_buy_levels
+        if not self.has_executable_put:
+            return ()
+        return self.put_sell_levels if side == "LONG" else self.put_buy_levels
 
 
 @dataclass(frozen=True)

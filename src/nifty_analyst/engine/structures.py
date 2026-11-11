@@ -8,9 +8,11 @@ drive structure selection across verticals, condors, and butterflies on equal fo
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Literal, Sequence
 
+from nifty_analyst.adapters.request_safety import walk_depth_levels
 from nifty_analyst.config import AnalystConfig
 from nifty_analyst.engine.part_a_gatekeeper import (
     compute_portfolio_summed_stop_rs,
@@ -51,7 +53,7 @@ def compute_leg_liquidity_score(
     depth_lots: int,
     max_rel_spread_pct: float = 5.0,
     min_oi: int = 10000,
-    min_depth_lots: int = 5,
+    min_depth_lots: int = 0,
 ) -> float:
     """Compute 0-100 liquidity score from relative bid-ask spread, book depth, volume, and OI."""
     mid = 0.5 * (bid + ask)
@@ -124,6 +126,10 @@ def build_option_leg(
         min_depth_lots=config.min_top_book_depth_lots,
     )
 
+    touch_qty = quote.touch_qty_for(option_type, side)
+    vis_qty = quote.visible_qty_for(option_type, side)
+    raw_levels = [[float(p), int(q)] for p, q in quote.levels_for(option_type, side)]
+
     return OptionLeg(
         strike=quote.strike,
         option_type=option_type,
@@ -145,6 +151,11 @@ def build_option_leg(
         quote_timestamp_ist=quote.quote_timestamp_ist,
         is_stale=is_stale,
         liquidity_score=liq_score,
+        touch_available_qty=touch_qty,
+        visible_depth_qty=vis_qty,
+        book_levels=raw_levels,
+        vwap_fill_price=round(bid if side == "SHORT" else ask, 4) if (touch_qty is not None and touch_qty > 0) else None,
+        fill_basis="FULL_SIZE_TOUCH" if (touch_qty is not None and touch_qty > 0) else "INDICATIVE_TOUCH_ONLY",
     )
 
 
@@ -617,33 +628,122 @@ def build_candidate_structure(
             )
 
     slip_per_leg = config.slippage_buffer_points_per_leg
-    payoff_specs_1lot: list[LegPayoffSpec] = []
-    signed_cashflow_pts = 0.0
-    total_slip_pts = 0.0
 
+    # 1. Always compute pure displayed-touch scenario baseline (for explicit indicative comparison)
+    touch_specs_1lot: list[LegPayoffSpec] = []
+    touch_signed_pts = 0.0
     for leg in legs:
         if leg.side == "SHORT":
-            exec_px = min(leg.bid, max(0.05, leg.bid - slip_per_leg))
-            signed_cashflow_pts += float(leg.ratio) * exec_px
+            t_exec = min(leg.bid, max(0.05, leg.bid - slip_per_leg))
+            touch_signed_pts += float(leg.ratio) * t_exec
         else:
-            exec_px = leg.ask + slip_per_leg
-            signed_cashflow_pts -= float(leg.ratio) * exec_px
-        total_slip_pts += float(leg.ratio) * slip_per_leg
-        payoff_specs_1lot.append(
+            t_exec = leg.ask + slip_per_leg
+            touch_signed_pts -= float(leg.ratio) * t_exec
+        touch_specs_1lot.append(
             LegPayoffSpec(
                 strike=leg.strike,
                 option_type=leg.option_type,
                 side=leg.side,
                 ratio=leg.ratio,
-                executable_entry_price=exec_px,
+                executable_entry_price=t_exec,
             )
         )
+    indicative_touch_net_pts = round(abs(touch_signed_pts), 2)
 
-    is_net_credit = signed_cashflow_pts >= 0.0
-    exec_net_pts = round(abs(signed_cashflow_pts), 2)
+    def _resolve_for_lots(
+        target_lots: int,
+    ) -> tuple[
+        list[OptionLeg],
+        list[LegPayoffSpec],
+        float,
+        float,
+        bool,
+        Literal["FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"],
+    ]:
+        out_legs: list[OptionLeg] = []
+        specs: list[LegPayoffSpec] = []
+        signed_pts = 0.0
+        slip_pts = 0.0
+        all_supported = True
+        any_walked = False
+
+        for leg in legs:
+            req_units = max(1, lot_size * target_lots * leg.ratio)
+            touch_px = leg.bid if leg.side == "SHORT" else leg.ask
+            leg_basis: Literal[
+                "FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"
+            ]
+            vwap_px: float | None
+
+            if leg.touch_available_qty is not None and leg.touch_available_qty >= req_units:
+                leg_basis = "FULL_SIZE_TOUCH"
+                vwap_px = round(touch_px, 4)
+                base_px = touch_px
+            elif leg.book_levels:
+                walk_px, _ = walk_depth_levels(leg.book_levels, req_units)
+                if walk_px is not None:
+                    leg_basis = "FULL_SIZE_BOOK_WALK"
+                    any_walked = True
+                    vwap_px = round(walk_px, 4)
+                    base_px = walk_px
+                else:
+                    leg_basis = "INDICATIVE_TOUCH_ONLY"
+                    all_supported = False
+                    vwap_px = None
+                    base_px = touch_px
+            else:
+                leg_basis = "INDICATIVE_TOUCH_ONLY"
+                all_supported = False
+                vwap_px = None
+                base_px = touch_px
+
+            if leg.side == "SHORT":
+                exec_px = min(base_px, max(0.05, base_px - slip_per_leg))
+                signed_pts += float(leg.ratio) * exec_px
+            else:
+                exec_px = base_px + slip_per_leg
+                signed_pts -= float(leg.ratio) * exec_px
+            slip_pts += float(leg.ratio) * slip_per_leg
+
+            out_legs.append(
+                dataclasses.replace(
+                    leg,
+                    vwap_fill_price=vwap_px,
+                    fill_basis=leg_basis,
+                )
+            )
+            specs.append(
+                LegPayoffSpec(
+                    strike=leg.strike,
+                    option_type=leg.option_type,
+                    side=leg.side,
+                    ratio=leg.ratio,
+                    executable_entry_price=exec_px,
+                )
+            )
+
+        cand_basis: Literal[
+            "FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"
+        ]
+        if not all_supported:
+            cand_basis = "INDICATIVE_TOUCH_ONLY"
+        elif any_walked:
+            cand_basis = "FULL_SIZE_BOOK_WALK"
+        else:
+            cand_basis = "FULL_SIZE_TOUCH"
+        return out_legs, specs, signed_pts, slip_pts, all_supported, cand_basis
+
+    (
+        legs_1lot,
+        payoff_specs_1lot,
+        signed_cashflow_1lot,
+        total_slip_pts,
+        supported_1lot,
+        basis_1lot,
+    ) = _resolve_for_lots(1)
 
     charges_1lot = compute_indian_statutory_charges_rs(
-        legs, lot_size, 1, config.brokerage_per_order_rs
+        legs_1lot, lot_size, 1, config.brokerage_per_order_rs
     )
     pw_1lot = compute_piecewise_expiry_payoff(
         payoff_specs_1lot, lot_size, 1, charges_1lot.total_charges_rs
@@ -654,7 +754,8 @@ def build_candidate_structure(
     else:
         lots = 1
         if (
-            pw_1lot.is_defined_risk
+            supported_1lot
+            and pw_1lot.is_defined_risk
             and 0.0 < pw_1lot.gross_max_loss_rs <= config.per_trade_contractual_max_loss_ceiling_rs
         ):
             max_lots_by_contractual = int(
@@ -665,12 +766,73 @@ def build_candidate_structure(
             max_lots_by_stop = int(rem_stop_budget // config.per_position_managed_stop_rs)
             lots = max(1, min(max_lots_by_contractual, max_lots_by_stop, config.max_lots_per_trade))
 
+    if lots != 1:
+        (
+            legs_nlots,
+            specs_nlots,
+            signed_nlots,
+            slip_nlots,
+            supported_nlots,
+            basis_nlots,
+        ) = _resolve_for_lots(lots)
+        charges_try = compute_indian_statutory_charges_rs(
+            legs_nlots, lot_size, lots, config.brokerage_per_order_rs
+        )
+        pw_try = compute_piecewise_expiry_payoff(
+            specs_nlots, lot_size, lots, charges_try.total_charges_rs
+        )
+        if forced_lots is None and (
+            not supported_nlots
+            or pw_try.gross_max_loss_rs > config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
+        ):
+            lots = 1
+            legs = legs_1lot
+            signed_cashflow_pts = signed_cashflow_1lot
+            full_size_fill_supported = supported_1lot
+            execution_fill_basis = basis_1lot
+        else:
+            legs = legs_nlots
+            payoff_specs_1lot = specs_nlots
+            signed_cashflow_pts = signed_nlots
+            total_slip_pts = slip_nlots
+            full_size_fill_supported = supported_nlots
+            execution_fill_basis = basis_nlots
+    else:
+        legs = legs_1lot
+        signed_cashflow_pts = signed_cashflow_1lot
+        full_size_fill_supported = supported_1lot
+        execution_fill_basis = basis_1lot
+
+    is_net_credit = signed_cashflow_pts >= 0.0
+    exec_net_pts = round(abs(signed_cashflow_pts), 2)
+
     charges = compute_indian_statutory_charges_rs(
         legs, lot_size, lots, config.brokerage_per_order_rs
     )
     pw = compute_piecewise_expiry_payoff(
         payoff_specs_1lot, lot_size, lots, charges.total_charges_rs
     )
+    pw_touch = compute_piecewise_expiry_payoff(
+        touch_specs_1lot, lot_size, lots, charges.total_charges_rs
+    )
+
+    if execution_fill_basis == "FULL_SIZE_TOUCH":
+        price_assumption_label = (
+            f"VERIFIED_TOUCH_DEPTH: >= {lot_size * lots} units available at displayed touch "
+            f"on every leg (+ {slip_per_leg:.2f} pts/leg slippage buffer)."
+        )
+    elif execution_fill_basis == "FULL_SIZE_BOOK_WALK":
+        price_assumption_label = (
+            f"QUANTITY_WEIGHTED_BOOK_WALK: touch depth < {lot_size * lots} units on >= 1 leg; "
+            f"priced via exact quantity-weighted walk across visible order-book levels for "
+            f"{lot_size * lots} units (+ {slip_per_leg:.2f} pts/leg slippage buffer)."
+        )
+    else:
+        price_assumption_label = (
+            f"INDICATIVE_TOUCH_SCENARIO_ONLY: displayed touch and visible depth cannot fill "
+            f"planned {lot_size * lots} units; scenario assumes unverified touch prices "
+            f"(+ {slip_per_leg:.2f} pts/leg buffer); full-size executable entry & max loss UNKNOWN."
+        )
 
     total_qty = float(lot_size * lots)
     strikes = sorted({l.strike for l in legs})
@@ -783,6 +945,8 @@ def build_candidate_structure(
         price_structure=price_structure,
         volatility=volatility,
         config=config,
+        full_size_fill_supported=full_size_fill_supported,
+        price_assumption_label=price_assumption_label,
     )
 
     tech_opt_score = compute_technical_options_score(
@@ -804,6 +968,19 @@ def build_candidate_structure(
         triggered_detectors=triggered_detectors,
     )
 
+    if full_size_fill_supported:
+        max_loss_method_str = (
+            f"LEG_WISE_PIECEWISE_EXPIRY_PAYOFF ({execution_fill_basis}): exact contractual worst case "
+            f"Rs {contractual_payoff_bound_rs:,.2f} at spot {pw.worst_case_spot:,.0f} "
+            f"(non-STT execution fees Rs {charges.total_charges_rs:,.2f}; {price_assumption_label})"
+        )
+    else:
+        max_loss_method_str = (
+            f"INDICATIVE_TOUCH_SCENARIO_ONLY (FULL-SIZE FILL UNSUPPORTED): touch-scenario bound "
+            f"Rs {contractual_payoff_bound_rs:,.2f} at spot {pw.worst_case_spot:,.0f} "
+            f"(non-STT fees Rs {charges.total_charges_rs:,.2f}; {price_assumption_label})"
+        )
+
     return CandidateStructure(
         structure_id=structure_id,
         structure_type=structure_type,
@@ -819,11 +996,7 @@ def build_candidate_structure(
         slippage_buffer_points_per_unit=round(total_slip_pts, 2),
         statutory_charges=charges,
         contractual_max_loss_rs=contractual_payoff_bound_rs,
-        contractual_max_loss_method=(
-            f"LEG_WISE_PIECEWISE_EXPIRY_PAYOFF: exact contractual worst case "
-            f"Rs {contractual_payoff_bound_rs:,.2f} at spot {pw.worst_case_spot:,.0f} "
-            f"(non-STT execution fees Rs {charges.total_charges_rs:,.2f})"
-        ),
+        contractual_max_loss_method=max_loss_method_str,
         margin_estimate_rs=margin_est_rs,
         margin_source="EXCHANGE_FORMULA_ESTIMATE",
         planned_stop_rs=planned_stop_rs,
@@ -856,6 +1029,17 @@ def build_candidate_structure(
         part_a_overall_status=part_a_overall,
         matches_part_b_style=matches_part_b_style,
         technical_options_score=tech_opt_score,
+        execution_fill_basis=execution_fill_basis,
+        full_size_fill_supported=full_size_fill_supported,
+        full_size_executable_net_points_per_unit=(
+            exec_net_pts if full_size_fill_supported else None
+        ),
+        full_size_contractual_max_loss_rs=(
+            contractual_payoff_bound_rs if full_size_fill_supported else None
+        ),
+        indicative_touch_net_points_per_unit=indicative_touch_net_pts,
+        indicative_touch_max_loss_rs=pw_touch.gross_max_loss_rs,
+        price_assumption_label=price_assumption_label,
     )
 
 

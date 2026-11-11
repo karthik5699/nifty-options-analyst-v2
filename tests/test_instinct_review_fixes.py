@@ -375,9 +375,10 @@ def test_p1_1_4_and_p3_4_depth_book_rejection_sorting_and_audit_logging(tmp_path
         },
     }
     ok_book = interpret_depth_book(unsorted_payload, fallback_lot_size=65)
-    assert ok_book.is_executable is True
-    assert (ok_book.best_bid, ok_book.best_ask) == (102.5, 103.0)
-    assert (ok_book.bid_depth_lots, ok_book.ask_depth_lots) == (5, 6)
+    assert ok_book.is_executable is False
+    assert (ok_book.best_bid, ok_book.best_ask) == (None, None)
+    assert ok_book.rejection_reason == "DEPTH_LEVEL_ORDER_INCONSISTENT"
+    assert ok_book.raw_payload == unsorted_payload
 
     # 2. Empty, locked, and crossed books -> fail closed to None with raw_payload preserved
     for bad_payload, expected_code in (
@@ -400,7 +401,7 @@ def test_p1_1_4_and_p3_4_depth_book_rejection_sorting_and_audit_logging(tmp_path
                     "sell": [{"price": "53.0", "quantity": "65"}, {"price": "51.0", "quantity": "65"}],
                 },
             },
-            "CROSSED_BOOK",
+            "DEPTH_LEVEL_ORDER_INCONSISTENT",
         ),
     ):
         rej = interpret_depth_book(bad_payload, fallback_lot_size=65)
