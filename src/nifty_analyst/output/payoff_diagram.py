@@ -8,13 +8,16 @@ directive so payoff diagrams show pure contractual expiry P&L net of execution f
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Sequence
 
+from nifty_analyst.adapters.request_safety import walk_depth_levels
 from nifty_analyst.engine.pricing import (
     LegPayoffSpec,
     compute_piecewise_expiry_payoff,
     evaluate_leg_expiry_pnl_per_unit,
 )
+from nifty_analyst.state import CandidateStructure
 
 FIGSIZE = (8.0, 4.5)
 DPI = 120
@@ -119,3 +122,113 @@ def render_payoff_diagram(
         "method_description": analysis.method_description,
         "out_path": out_path,
     }
+
+
+def candidate_to_payoff_specs(
+    cand: CandidateStructure,
+    slippage_buffer_points_per_leg: float = 0.50,
+) -> list[LegPayoffSpec]:
+    """Build `LegPayoffSpec` entries strictly from the candidate's full-size walked fill prices.
+
+    Never falls back to top-of-book touch quotes when a leg was book-walked (`FULL_SIZE_BOOK_WALK`)
+    or lacks full-size fill support (`INDICATIVE_TOUCH_ONLY`).
+    """
+    if not cand.full_size_fill_supported or cand.execution_fill_basis == "INDICATIVE_TOUCH_ONLY":
+        raise ValueError(
+            f"PAYOFF_CHART_UNSUPPORTED_FILL: candidate {cand.structure_id!r} lacks full-size "
+            f"executable fill support ({cand.execution_fill_basis})."
+        )
+
+    slip = float(slippage_buffer_points_per_leg)
+    specs: list[LegPayoffSpec] = []
+    for leg in cand.legs:
+        if leg.fill_basis == "INDICATIVE_TOUCH_ONLY":
+            raise ValueError(
+                f"PAYOFF_CHART_UNSUPPORTED_LEG_FILL: leg {leg.strike} {leg.option_type} on "
+                f"{cand.structure_id!r} is INDICATIVE_TOUCH_ONLY."
+            )
+        req_units = max(1, cand.lot_size * cand.lots * leg.ratio)
+        if leg.executable_entry_price is not None:
+            exec_px = float(leg.executable_entry_price)
+        elif leg.vwap_fill_price is not None:
+            base_px = float(leg.vwap_fill_price)
+            exec_px = (
+                round(min(base_px, max(0.05, base_px - slip)), 6)
+                if leg.side == "SHORT"
+                else round(base_px + slip, 6)
+            )
+        elif leg.book_levels:
+            walk_px, _ = walk_depth_levels(leg.book_levels, req_units)
+            if walk_px is None:
+                raise ValueError(
+                    f"PAYOFF_CHART_UNSUPPORTED_DEPTH: leg {leg.strike} {leg.option_type} on "
+                    f"{cand.structure_id!r} cannot walk {req_units} units."
+                )
+            exec_px = (
+                round(min(walk_px, max(0.05, walk_px - slip)), 6)
+                if leg.side == "SHORT"
+                else round(walk_px + slip, 6)
+            )
+        else:
+            if leg.touch_available_qty is not None and leg.touch_available_qty < req_units:
+                raise ValueError(
+                    f"PAYOFF_CHART_INSUFFICIENT_TOUCH: leg {leg.strike} {leg.option_type} on "
+                    f"{cand.structure_id!r} has touch_available_qty={leg.touch_available_qty} < {req_units}."
+                )
+            base_px = leg.bid if leg.side == "SHORT" else leg.ask
+            exec_px = (
+                round(min(base_px, max(0.05, base_px - slip)), 6)
+                if leg.side == "SHORT"
+                else round(base_px + slip, 6)
+            )
+
+        specs.append(
+            LegPayoffSpec(
+                strike=leg.strike,
+                option_type=leg.option_type,
+                side=leg.side,
+                ratio=leg.ratio,
+                executable_entry_price=exec_px,
+            )
+        )
+    return specs
+
+
+def render_candidate_payoff_diagram(
+    cand: CandidateStructure,
+    out_path: str,
+    slippage_buffer_points_per_leg: float = 0.50,
+) -> dict:
+    """Render a candidate's expiry payoff chart using walked leg prices and verify risk parity."""
+    specs = candidate_to_payoff_specs(
+        cand, slippage_buffer_points_per_leg=slippage_buffer_points_per_leg
+    )
+    diag = render_payoff_diagram(
+        legs=specs,
+        lot_size=cand.lot_size,
+        lots=cand.lots,
+        statutory_charges_rs=cand.statutory_charges.total_charges_rs,
+        title=f"{cand.structure_id} ({cand.structure_type})",
+        out_path=out_path,
+    )
+    expected_net_loss = cand.contractual_max_loss_rs + cand.statutory_charges.total_charges_rs
+    be_diag = list(diag["breakevens_net"])
+    be_cand = list(cand.breakevens_net)
+    be_mismatch = len(be_diag) != len(be_cand) or any(
+        abs(float(a) - float(b)) > 0.05 for a, b in zip(be_diag, be_cand)
+    )
+    if (
+        abs(float(diag["gross_max_loss_rs"]) - float(cand.contractual_max_loss_rs)) > 0.05
+        or abs(float(diag["max_loss_rs"]) - float(expected_net_loss)) > 0.05
+        or abs(float(diag["max_profit_rs"]) - float(cand.max_profit_rs)) > 0.05
+        or be_mismatch
+    ):
+        Path(out_path).unlink(missing_ok=True)
+        raise ValueError(
+            f"PAYOFF_CHART_RISK_MISMATCH for {cand.structure_id!r}: "
+            f"chart=(gross_loss={diag['gross_max_loss_rs']}, net_loss={diag['max_loss_rs']}, "
+            f"max_profit={diag['max_profit_rs']}, be={be_diag}) vs "
+            f"candidate=(contractual_loss={cand.contractual_max_loss_rs}, "
+            f"expected_net_loss={expected_net_loss}, max_profit={cand.max_profit_rs}, be={be_cand})"
+        )
+    return diag

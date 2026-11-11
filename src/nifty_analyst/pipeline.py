@@ -79,12 +79,15 @@ from nifty_analyst.state import (
     VolatilityEvidence,
 )
 from nifty_analyst.synthesis.evidence_snapshot import (
+    EvidenceSnapshotClockError,
+    StaleEvidenceSnapshotError,
     compute_state_evidence_sha256,
     has_existing_snapshot_for_artifact,
     load_and_verify_snapshot_for_resume,
     mint_unique_capture_identities,
     parse_strict_ist_timestamp,
     persist_immutable_snapshot_bundle,
+    validate_capture_and_resume_clocks,
 )
 from nifty_analyst.synthesis.llm_node import (
     LLMProvider,
@@ -279,37 +282,24 @@ def _maybe_render_payoff_chart(
     run_id: str,
     config: AnalystConfig,
 ) -> str:
-    if cand is None or not config.payoff_chart_dir:
+    if cand is None or not cand.full_size_fill_supported or not config.payoff_chart_dir:
         return ""
     try:
-        from nifty_analyst.output.payoff_diagram import render_payoff_diagram
+        from nifty_analyst.output.payoff_diagram import render_candidate_payoff_diagram
+    except ImportError:
+        return ""
 
-        out_dir = Path(config.payoff_chart_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"{run_id}_{cand.structure_id}.png"
-        slip = config.slippage_buffer_points_per_leg
-        specs = [
-            LegPayoffSpec(
-                strike=l.strike,
-                option_type=l.option_type,
-                side=l.side,
-                ratio=l.ratio,
-                executable_entry_price=(
-                    min(l.bid, max(0.05, l.bid - slip)) if l.side == "SHORT" else (l.ask + slip)
-                ),
-            )
-            for l in cand.legs
-        ]
-        render_payoff_diagram(
-            legs=specs,
-            lot_size=cand.lot_size,
-            lots=cand.lots,
-            statutory_charges_rs=cand.statutory_charges.total_charges_rs,
-            title=f"{cand.structure_id} ({cand.structure_type})",
+    out_dir = Path(config.payoff_chart_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{run_id}_{cand.structure_id}.png"
+    try:
+        render_candidate_payoff_diagram(
+            cand=cand,
             out_path=str(out_file),
+            slippage_buffer_points_per_leg=config.slippage_buffer_points_per_leg,
         )
         return str(out_file)
-    except Exception:
+    except ModuleNotFoundError:
         return ""
 
 
@@ -849,13 +839,12 @@ def run_analyst_pipeline(
         if capture_completed_raw.tzinfo is None or capture_completed_raw.utcoffset() is None:
             parse_strict_ist_timestamp("", "capture_completed_at_ist")
         capture_completed_dt = capture_completed_raw.astimezone(IST)
-        if capture_completed_dt < capture_started_dt:
-            from nifty_analyst.synthesis.evidence_snapshot import EvidenceSnapshotClockError
-
-            raise EvidenceSnapshotClockError(
-                f"INCONSISTENT_CAPTURE_CLOCK_ORDER: completed {capture_completed_dt.isoformat()} "
-                f"< started {capture_started_dt.isoformat()}."
-            )
+        validate_capture_and_resume_clocks(
+            capture_started_at_ist=capture_started_dt.isoformat(),
+            capture_completed_at_ist=capture_completed_dt.isoformat(),
+            resume_now_dt=capture_completed_dt,
+            max_age_seconds=float(config.max_quote_staleness_seconds),
+        )
 
         slot_approved = is_approved_schedule_slot(
             dec_ist,
@@ -966,7 +955,11 @@ def run_analyst_pipeline(
         if default_primary is None or c.structure_id != default_primary.structure_id
     ]
 
-    provider = llm_provider or build_llm_provider(config, wall_clock_fn=clock_fn)
+    provider = llm_provider or build_llm_provider(
+        config,
+        wall_clock_fn=clock_fn,
+        preloaded_bundle=(loaded if resuming_from_snapshot else None),
+    )
     sanitised_json = json.dumps(scrubber.scrub_obj(pre_llm_state.to_dict()), indent=2)
     llm_resp = provider.synthesize(
         sanitised_state_json=sanitised_json,
@@ -1187,6 +1180,21 @@ def run_analyst_pipeline(
 
     chart_path = _maybe_render_payoff_chart(selected_primary, run_id, config)
 
+    # Re-verify the 180-second capture-start deadline immediately before emitting final output
+    # so a run started at e.g. 179s that finishes at 190s fails closed before delivery.
+    try:
+        final_now_dt = clock_fn()
+        validate_capture_and_resume_clocks(
+            capture_started_at_ist=meta.capture_started_at_ist,
+            capture_completed_at_ist=meta.capture_completed_at_ist,
+            resume_now_dt=final_now_dt,
+            max_age_seconds=float(config.max_quote_staleness_seconds),
+        )
+    except (StaleEvidenceSnapshotError, EvidenceSnapshotClockError):
+        if chart_path:
+            Path(chart_path).unlink(missing_ok=True)
+        raise
+
     staleness_notes = [
         f"Spot as-of {contract_ctx.spot.as_of_ist} (stale={contract_ctx.spot.is_stale})",
         f"Chain quotes across {evaluated_chains_count} expiry(s) [{earliest_q} .. {latest_q}] (any_stale=False)",
@@ -1218,7 +1226,7 @@ def run_analyst_pipeline(
         research_rule_challenge_note=final_challenge,
         confidence_note=final_confidence,
         staleness_report=staleness_notes,
-        llm_citations=verified_citations,
+        llm_citations=(verified_citations if verifier_report.passed_verification else []),
         verifier_report=verifier_report,
         whatsapp_digest=whatsapp_digest,
         duplicate_alert_suppressed=duplicate_suppressed,

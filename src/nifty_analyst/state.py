@@ -289,6 +289,7 @@ class OptionLeg:
     visible_depth_qty: int | None = None
     book_levels: list[list[float]] = field(default_factory=list)
     vwap_fill_price: float | None = None
+    executable_entry_price: float | None = None
     fill_basis: Literal["FULL_SIZE_TOUCH", "FULL_SIZE_BOOK_WALK", "INDICATIVE_TOUCH_ONLY"] = (
         "FULL_SIZE_TOUCH"
     )

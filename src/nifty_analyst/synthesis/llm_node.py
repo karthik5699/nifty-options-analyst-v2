@@ -28,6 +28,7 @@ from nifty_analyst.state import (
     RiskTriadState,
 )
 from nifty_analyst.synthesis.evidence_snapshot import (
+    LoadedSnapshotBundle,
     SnapshotTamperOrMismatchError,
     compute_state_evidence_sha256,
     has_existing_snapshot_for_artifact,
@@ -35,6 +36,7 @@ from nifty_analyst.synthesis.evidence_snapshot import (
     mint_unique_capture_identities,
     persist_immutable_snapshot_bundle,
     snapshot_paths_for_artifact,
+    validate_capture_and_resume_clocks,
 )
 from nifty_analyst.synthesis.personas import (
     PERSONA_DEFINITIONS,
@@ -434,11 +436,13 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         max_age_seconds: float = 180.0,
         registry_root: str | Path | None = None,
         wall_clock_fn: Callable[[], dt.datetime] | None = None,
+        preloaded_bundle: LoadedSnapshotBundle | None = None,
     ) -> None:
         self.artifact_path = artifact_path
         self.max_age_seconds = float(max_age_seconds)
         self.registry_root = Path(registry_root) if registry_root else None
         self._wall_clock_fn = wall_clock_fn or (lambda: dt.datetime.now(tz=IST))
+        self._preloaded_bundle = preloaded_bundle
 
     def synthesize(
         self,
@@ -454,68 +458,71 @@ class AgentArtifactSynthesisProvider(LLMProvider):
                 "(agent_synthesis_artifact_path) to be set"
             )
         p = Path(self.artifact_path)
-        now_ist = self._wall_clock_fn()
         _, request_path, _, _ = snapshot_paths_for_artifact(p, self.registry_root)
 
-        if not has_existing_snapshot_for_artifact(p, self.registry_root):
-            # Standalone provider invocation where pipeline has not yet persisted the bundle:
-            # mint missing capture clocks/identities if absent and write once (`O_CREAT | O_EXCL`).
-            meta = state.run_metadata
-            cap_start = meta.capture_started_at_ist or ensure_ist(now_ist).isoformat()
-            cap_end = meta.capture_completed_at_ist or cap_start
-            stamped_meta = dataclasses.replace(
-                meta,
-                capture_started_at_ist=cap_start,
-                capture_completed_at_ist=cap_end,
-            )
-            stamped_state = dataclasses.replace(state, run_metadata=stamped_meta)
-            _, ev_sha = compute_state_evidence_sha256(stamped_state)
-            if not stamped_meta.snapshot_id or stamped_meta.evidence_sha256 != ev_sha:
-                dec_dt = dt.datetime.fromisoformat(stamped_meta.decision_timestamp_ist)
-                cap_dt = dt.datetime.fromisoformat(cap_start)
-                minted_run_id, minted_snap_id = mint_unique_capture_identities(
-                    dec_dt, cap_dt, stamped_meta.config_hash, ev_sha
-                )
+        if self._preloaded_bundle is not None:
+            loaded = self._preloaded_bundle
+        else:
+            now_ist = self._wall_clock_fn()
+            if not has_existing_snapshot_for_artifact(p, self.registry_root):
+                # Standalone provider invocation where pipeline has not yet persisted the bundle:
+                # mint missing capture clocks/identities if absent and write once (`O_CREAT | O_EXCL`).
+                meta = state.run_metadata
+                cap_start = meta.capture_started_at_ist or ensure_ist(now_ist).isoformat()
+                cap_end = meta.capture_completed_at_ist or cap_start
                 stamped_meta = dataclasses.replace(
-                    stamped_meta,
-                    run_id=stamped_meta.run_id or minted_run_id,
-                    snapshot_id=stamped_meta.snapshot_id or minted_snap_id,
-                    evidence_sha256=ev_sha,
+                    meta,
+                    capture_started_at_ist=cap_start,
+                    capture_completed_at_ist=cap_end,
                 )
                 stamped_state = dataclasses.replace(state, run_metadata=stamped_meta)
+                _, ev_sha = compute_state_evidence_sha256(stamped_state)
+                if not stamped_meta.snapshot_id or stamped_meta.evidence_sha256 != ev_sha:
+                    dec_dt = dt.datetime.fromisoformat(stamped_meta.decision_timestamp_ist)
+                    cap_dt = dt.datetime.fromisoformat(cap_start)
+                    minted_run_id, minted_snap_id = mint_unique_capture_identities(
+                        dec_dt, cap_dt, stamped_meta.config_hash, ev_sha
+                    )
+                    stamped_meta = dataclasses.replace(
+                        stamped_meta,
+                        run_id=stamped_meta.run_id or minted_run_id,
+                        snapshot_id=stamped_meta.snapshot_id or minted_snap_id,
+                        evidence_sha256=ev_sha,
+                    )
+                    stamped_state = dataclasses.replace(state, run_metadata=stamped_meta)
 
-            desk_brief = build_compact_desk_brief(stamped_state)
-            req_payload = {
-                "run_id": stamped_state.run_metadata.run_id,
-                "snapshot_id": stamped_state.run_metadata.snapshot_id,
-                "evidence_sha256": stamped_state.run_metadata.evidence_sha256,
-                "decision_timestamp_ist": stamped_state.run_metadata.decision_timestamp_ist,
-                "capture_started_at_ist": stamped_state.run_metadata.capture_started_at_ist,
-                "capture_completed_at_ist": stamped_state.run_metadata.capture_completed_at_ist,
-                "max_resume_age_seconds": self.max_age_seconds,
-                "compact_desk_brief": desk_brief,
-                "persona_instructions": PERSONA_DEFINITIONS,
-                "single_pass_prompt": build_single_pass_persona_prompt(desk_brief),
-                "sanitised_state": (
-                    json.loads(sanitised_state_json)
-                    if sanitised_state_json
-                    else stamped_state.to_dict()
-                ),
-            }
-            persist_immutable_snapshot_bundle(
+                desk_brief = build_compact_desk_brief(stamped_state)
+                req_payload = {
+                    "run_id": stamped_state.run_metadata.run_id,
+                    "snapshot_id": stamped_state.run_metadata.snapshot_id,
+                    "evidence_sha256": stamped_state.run_metadata.evidence_sha256,
+                    "decision_timestamp_ist": stamped_state.run_metadata.decision_timestamp_ist,
+                    "capture_started_at_ist": stamped_state.run_metadata.capture_started_at_ist,
+                    "capture_completed_at_ist": stamped_state.run_metadata.capture_completed_at_ist,
+                    "max_resume_age_seconds": self.max_age_seconds,
+                    "compact_desk_brief": desk_brief,
+                    "persona_instructions": PERSONA_DEFINITIONS,
+                    "single_pass_prompt": build_single_pass_persona_prompt(desk_brief),
+                    "sanitised_state": (
+                        json.loads(sanitised_state_json)
+                        if sanitised_state_json
+                        else stamped_state.to_dict()
+                    ),
+                }
+                persist_immutable_snapshot_bundle(
+                    artifact_path=p,
+                    state=stamped_state,
+                    request_payload=req_payload,
+                    registry_root=self.registry_root,
+                )
+
+            # Always verify against the immutable stored snapshot + pin + 180s capture-start clock
+            loaded = load_and_verify_snapshot_for_resume(
                 artifact_path=p,
-                state=stamped_state,
-                request_payload=req_payload,
+                resume_now_dt=now_ist,
+                max_age_seconds=self.max_age_seconds,
                 registry_root=self.registry_root,
             )
-
-        # Always verify against the immutable stored snapshot + pin + 180s capture-start clock
-        loaded = load_and_verify_snapshot_for_resume(
-            artifact_path=p,
-            resume_now_dt=now_ist,
-            max_age_seconds=self.max_age_seconds,
-            registry_root=self.registry_root,
-        )
 
         # Verify caller-supplied `state` matches the pinned snapshot (never synthesize over changed data)
         _, caller_sha = compute_state_evidence_sha256(
@@ -587,6 +594,14 @@ class AgentArtifactSynthesisProvider(LLMProvider):
             payload, fb_deb, fb_triad, fb_cons
         )
 
+        if self._preloaded_bundle is None:
+            validate_capture_and_resume_clocks(
+                capture_started_at_ist=loaded.capture_started_at_ist,
+                capture_completed_at_ist=loaded.capture_completed_at_ist,
+                resume_now_dt=self._wall_clock_fn(),
+                max_age_seconds=self.max_age_seconds,
+            )
+
         return LLMSynthesisResponse(
             model_id=str(payload["model_id"]),
             reasoning_summary=str(payload["reasoning_summary"]),
@@ -613,6 +628,7 @@ def _resolve_snapshot_registry_root(config: AnalystConfig) -> Path | None:
 def build_llm_provider(
     config: AnalystConfig,
     wall_clock_fn: Callable[[], dt.datetime] | None = None,
+    preloaded_bundle: LoadedSnapshotBundle | None = None,
 ) -> LLMProvider:
     if config.llm_provider == "hosted_api":
         return HostedBudgetGuardedLLMProvider(config)
@@ -624,5 +640,6 @@ def build_llm_provider(
             max_age_seconds=float(config.max_quote_staleness_seconds),
             registry_root=_resolve_snapshot_registry_root(config),
             wall_clock_fn=wall_clock_fn,
+            preloaded_bundle=preloaded_bundle,
         )
     return OfflineDeterministicSynthesisProvider(model_id="deterministic-persona-synthesizer-v4")

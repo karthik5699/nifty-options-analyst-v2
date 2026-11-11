@@ -260,7 +260,12 @@ def compute_indian_statutory_charges_rs(
 
     for leg in legs:
         leg_qty = qty * float(leg.ratio)
-        entry_val = (leg.bid if leg.side == "SHORT" else leg.ask) * leg_qty
+        entry_px = (
+            leg.vwap_fill_price
+            if leg.vwap_fill_price is not None
+            else (leg.bid if leg.side == "SHORT" else leg.ask)
+        )
+        entry_val = entry_px * leg_qty
         exit_val = leg.mid * leg_qty
         if leg.side == "SHORT":
             sell_premium_turnover += entry_val
@@ -698,10 +703,10 @@ def build_candidate_structure(
                 base_px = touch_px
 
             if leg.side == "SHORT":
-                exec_px = min(base_px, max(0.05, base_px - slip_per_leg))
+                exec_px = round(min(base_px, max(0.05, base_px - slip_per_leg)), 6)
                 signed_pts += float(leg.ratio) * exec_px
             else:
-                exec_px = base_px + slip_per_leg
+                exec_px = round(base_px + slip_per_leg, 6)
                 signed_pts -= float(leg.ratio) * exec_px
             slip_pts += float(leg.ratio) * slip_per_leg
 
@@ -709,6 +714,9 @@ def build_candidate_structure(
                 dataclasses.replace(
                     leg,
                     vwap_fill_price=vwap_px,
+                    executable_entry_price=(
+                        exec_px if leg_basis != "INDICATIVE_TOUCH_ONLY" else None
+                    ),
                     fill_basis=leg_basis,
                 )
             )

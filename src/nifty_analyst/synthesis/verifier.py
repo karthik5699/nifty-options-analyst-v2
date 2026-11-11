@@ -45,6 +45,109 @@ _VERB_LEG_RE = re.compile(
     r"\b(?P<verb>Buy|Sell|Long|Short)\s+(?:(?P<ratio>\d+)x\s*)?(?P<strike>1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})\s*(?P<opt>CE|PE)\b",
     re.IGNORECASE,
 )
+_FOREIGN_INSTRUMENT_RE = re.compile(
+    r"\b(?:BANKNIFTY|BANK\s+NIFTY|FINNIFTY|FIN\s+NIFTY|MIDCPNIFTY|MIDCAP\s+NIFTY|"
+    r"NIFTYNXT50|NIFTY\s+NEXT\s*50|NIFTYIT|NIFTY\s+IT|SENSEX|BANKEX)\b",
+    re.IGNORECASE,
+)
+_ACTIONABLE_VERB_RE = re.compile(
+    r"(?<![A-Za-z-])\b(?P<verb>Buy|Sell|Enter|Execute)\b(?![A-Za-z-])",
+    re.IGNORECASE,
+)
+_STRICT_BUY_SELL_LEG_RE = re.compile(
+    r"^(?P<verb>Buy|Sell)\s+"
+    r"(?:(?P<qty>\d[\d,]*)\s*(?P<qkind>lots?|units?|qty)\s+(?:of\s+)?)?"
+    r"(?:(?P<ratio>\d+)x\s*)?"
+    r"(?:NIFTY\s+)?"
+    r"(?P<strike>1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})\s*(?P<opt>CE|PE)\b",
+    re.IGNORECASE,
+)
+_STRICT_ENTER_EXEC_LEG_RE = re.compile(
+    r"^(?P<verb>Enter|Execute)\s+"
+    r"(?:(?P<qty>\d[\d,]*)\s*(?P<qkind>lots?|units?|qty)\s+(?:of\s+)?)?"
+    r"(?:(?P<ratio>\d+)x\s*)?"
+    r"(?:NIFTY\s+)?"
+    r"(?P<strike>1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})\s*(?P<opt>CE|PE)\b",
+    re.IGNORECASE,
+)
+_STRICT_ENTER_EXEC_STRUCT_RE = re.compile(
+    r"^(?:Enter|Execute)\s+`?(?P<sid>" + _STRUCT_ID_RE.pattern + r")`?",
+    re.IGNORECASE,
+)
+_LONG_SHORT_INSTRUMENT_RE = re.compile(
+    r"(?<![A-Za-z-])\b(?P<verb>Long|Short)(?![A-Za-z-])\s+(?:"
+    r"(?:\d[\d,]*\s*(?:lots?|units?|qty|contracts?)\s*(?:of\s+)?)?(?:(?:NIFTY\s+)?futures?\b|$|[.,;])"
+    r"|(?!(?:CE|PE)\b)(?P<sym>[A-Z][A-Z0-9]{1,15})\b"
+    r")"
+)
+_UPPER_WORD_RE = re.compile(r"\b[A-Z]{4,}[A-Z0-9]*\b")
+
+_ALLOWED_STATIC_UPPER_WORDS: frozenset[str] = frozenset(
+    {
+        "NIFTY",
+        "WAIT",
+        "PASS",
+        "FAIL",
+        "FAILED",
+        "UNKNOWN",
+        "UNVERIFIED",
+        "VERIFIED",
+        "UNAVAILABLE",
+        "BULLISH",
+        "BEARISH",
+        "NEUTRAL",
+        "UPTREND",
+        "DOWNTREND",
+        "RANGE",
+        "CONTANGO",
+        "BACKWARDATION",
+        "FLAT",
+        "HIGH",
+        "MODERATE",
+        "MEDIUM",
+        "SHORT",
+        "LONG",
+        "RESEARCH",
+        "NOTE",
+        "ONLY",
+        "LIVE",
+        "READY",
+        "ACTIVE",
+        "HALTED",
+        "SUPPRESSED",
+        "SUGGESTION",
+        "INDICATIVE",
+        "INSUFFICIENT",
+        "DATA",
+        "MA20",
+        "EMA50",
+        "CM30",
+        "SEBI",
+        "VWAP",
+        "BLACK",
+        "NONE",
+        "TRUE",
+        "FALSE",
+        "JSON",
+        "JSONL",
+        "HTTP",
+        "POST",
+        "MODE",
+        "HARD",
+        "STRICT",
+        "SINGLE",
+        "CONSTRAINTS",
+        "CREDIT",
+        "DEBIT",
+        "OPTIONS",
+        "ANALYST",
+        "OFFLINE",
+        "STALE",
+        "ZERO",
+        "EXPIRY",
+        "MACRO",
+    }
+)
 
 _POLICY_CONSTANTS: tuple[float, ...] = (2000.0, 10000.0, 0.0, 100.0, 150.0, 200.0)
 
@@ -180,6 +283,225 @@ def _allowed_tokens_for_state(state: NiftyOptionsState) -> set[str]:
     return allowed
 
 
+def _allowed_upper_words_for_state(state: NiftyOptionsState) -> set[str]:
+    allowed = set(_ALLOWED_STATIC_UPPER_WORDS)
+    allowed.update(_UPPER_WORD_RE.findall(state.contract_context.symbol.upper()))
+    for ev in state.market_evidence.event_calendar.events_within_dte:
+        allowed.update(_UPPER_WORD_RE.findall(ev.event_name.upper()))
+        allowed.update(_UPPER_WORD_RE.findall(ev.category.upper()))
+    for det in state.market_evidence.triggered_detectors:
+        allowed.update(_UPPER_WORD_RE.findall(det.detector_name.upper()))
+    return allowed
+
+
+def _leg_matches_candidate(
+    cand: CandidateStructure,
+    strike_int: int,
+    opt_type: str,
+    expected_side: str | None = None,
+    expected_ratio: int | None = None,
+    expected_qty: int | None = None,
+    qty_kind: str | None = None,
+) -> bool:
+    if expected_qty is not None and qty_kind is not None:
+        qk = qty_kind.lower()
+        if qk.startswith("lot"):
+            if expected_qty != cand.lots:
+                return False
+        else:
+            if expected_qty != cand.lot_size * cand.lots:
+                return False
+    for leg in cand.legs:
+        if int(round(leg.strike)) == strike_int and leg.option_type == opt_type:
+            if expected_side is not None and leg.side != expected_side:
+                continue
+            if expected_ratio is not None and leg.ratio != expected_ratio:
+                continue
+            return True
+    return False
+
+
+def _check_trade_directives_quantities_and_symbols(
+    field_name: str,
+    text: str,
+    state: NiftyOptionsState,
+    scoped_candidates: Sequence[CandidateStructure],
+    selected_primary: CandidateStructure | None,
+    allowed_upper_words: set[str],
+    errors: list[str],
+    is_digest: bool = False,
+) -> int:
+    """Reject foreign symbols, wrong unit/lot quantities, and unbound trade directives in ANY text."""
+    checked = 0
+    pos = state.market_evidence.derivatives_positioning
+
+    # 1. Explicit foreign index / instrument blocklist (case-insensitive)
+    for m_fi in _FOREIGN_INSTRUMENT_RE.finditer(text):
+        checked += 1
+        errors.append(f"{field_name}:FOREIGN_INSTRUMENT:{m_fi.group(0)}")
+
+    # 2. Unlisted uppercase ticker / contract words (>= 4 chars)
+    clean_upper_scan = re.sub(r"`[a-z0-9_.\[\]]+`", " ", text)
+    clean_upper_scan = _STRUCT_ID_RE.sub(" ", clean_upper_scan)
+    clean_upper_scan = _FOREIGN_UNDERSCORE_TOKEN_RE.sub(" ", clean_upper_scan)
+    for uw in _UPPER_WORD_RE.findall(clean_upper_scan):
+        checked += 1
+        if uw not in allowed_upper_words:
+            errors.append(f"{field_name}:FOREIGN_UPPER_SYMBOL:{uw}")
+
+    # 3. Unit, lot, and contract count binding
+    for m_qty in re.finditer(r"\b(\d[\d,]*)\s*(?:units?|qty|quantities)\b", text, re.IGNORECASE):
+        q_val = int(m_qty.group(1).replace(",", ""))
+        checked += 1
+        allowed_units = {c.lot_size * c.lots for c in scoped_candidates}
+        if not allowed_units or q_val not in allowed_units:
+            errors.append(f"{field_name}:WRONG_QUANTITY:{q_val}!=expected:{sorted(allowed_units)}")
+
+    for m_lot in re.finditer(r"\b(\d[\d,]*)\s*lots?\b", text, re.IGNORECASE):
+        l_val = int(m_lot.group(1).replace(",", ""))
+        checked += 1
+        allowed_lots = {c.lots for c in scoped_candidates}
+        if not allowed_lots or l_val not in allowed_lots:
+            errors.append(f"{field_name}:WRONG_LOTS:{l_val}!=expected:{sorted(allowed_lots)}")
+
+    for m_con in re.finditer(r"\b(\d[\d,]*)\s*contracts?\b", text, re.IGNORECASE):
+        c_val = int(m_con.group(1).replace(",", ""))
+        checked += 1
+        prefix = text[max(0, m_con.start() - 20) : m_con.start()]
+        if re.search(r"\b(?:buy|sell|long|short|enter|execute|trade)\s*$", prefix, re.IGNORECASE):
+            allowed_contracts = {c.lots for c in scoped_candidates}
+        else:
+            allowed_contracts = {
+                pos.put_oi_wall_contracts,
+                pos.call_oi_wall_contracts,
+            } | {c.lots for c in scoped_candidates}
+        if c_val not in allowed_contracts:
+            errors.append(f"{field_name}:WRONG_CONTRACTS:{c_val}")
+
+    # 4. Actionable trade-verb directives (`Buy`, `Sell`, `Enter`, `Execute`) must match
+    #    `selected_primary` ONLY (never a non-selected candidate or unbound symbol/quantity!)
+    for m_act in _ACTIONABLE_VERB_RE.finditer(text):
+        verb = m_act.group("verb").upper()
+        tail = text[m_act.start() :]
+        checked += 1
+        if selected_primary is None:
+            errors.append(f"{field_name}:TRADE_DIRECTIVE_ON_WAIT:{verb}")
+            continue
+        if verb in ("BUY", "SELL"):
+            m_bs = _STRICT_BUY_SELL_LEG_RE.match(tail)
+            if m_bs is None:
+                errors.append(f"{field_name}:UNBOUND_TRADE_DIRECTIVE:{tail[:32].strip()}")
+                continue
+            exp_side = "LONG" if verb == "BUY" else "SHORT"
+            k_int = int(m_bs.group("strike"))
+            opt_t = m_bs.group("opt").upper()
+            r_int = int(m_bs.group("ratio")) if m_bs.group("ratio") else None
+            q_int = int(m_bs.group("qty").replace(",", "")) if m_bs.group("qty") else None
+            q_kind = m_bs.group("qkind")
+            if not _leg_matches_candidate(
+                selected_primary, k_int, opt_t, exp_side, r_int, q_int, q_kind
+            ):
+                errors.append(f"{field_name}:WRONG_DIRECTIVE_LEG:{verb}_{k_int}{opt_t}")
+        else:
+            m_es = _STRICT_ENTER_EXEC_STRUCT_RE.match(tail)
+            if m_es is not None:
+                if m_es.group("sid") != selected_primary.structure_id:
+                    errors.append(
+                        f"{field_name}:WRONG_DIRECTIVE_STRUCTURE:{m_es.group('sid')}!=expected:{selected_primary.structure_id}"
+                    )
+                continue
+            m_el = _STRICT_ENTER_EXEC_LEG_RE.match(tail)
+            if m_el is None:
+                errors.append(f"{field_name}:UNBOUND_ENTER_EXECUTE:{tail[:32].strip()}")
+                continue
+            k_int = int(m_el.group("strike"))
+            opt_t = m_el.group("opt").upper()
+            r_int = int(m_el.group("ratio")) if m_el.group("ratio") else None
+            q_int = int(m_el.group("qty").replace(",", "")) if m_el.group("qty") else None
+            q_kind = m_el.group("qkind")
+            if not _leg_matches_candidate(
+                selected_primary, k_int, opt_t, None, r_int, q_int, q_kind
+            ):
+                errors.append(f"{field_name}:WRONG_ENTER_EXECUTE_LEG:{k_int}{opt_t}")
+
+    # 5. `Long` / `Short` futures or ticker directives, plus `_VERB_LEG_RE` & `_COMPACT_LEG_RE`
+    for m_ls in _LONG_SHORT_INSTRUMENT_RE.finditer(text):
+        checked += 1
+        errors.append(f"{field_name}:UNBOUND_LONG_SHORT_TARGET:{m_ls.group(0)}")
+
+    for m_vleg in _VERB_LEG_RE.finditer(text):
+        verb = m_vleg.group("verb").upper()
+        k_int = int(m_vleg.group("strike"))
+        opt = m_vleg.group("opt").upper()
+        r_int = int(m_vleg.group("ratio")) if m_vleg.group("ratio") else None
+        exp_side = "LONG" if verb in ("BUY", "LONG") else "SHORT"
+        checked += 1
+        if not scoped_candidates or not any(
+            _leg_matches_candidate(c, k_int, opt, exp_side, r_int) for c in scoped_candidates
+        ):
+            errors.append(f"{field_name}:WRONG_VERB_LEG:{verb}_{k_int}{opt}")
+
+    oi_ref_strikes = {
+        (int(round(pos.put_oi_wall_strike)), "PE"),
+        (int(round(pos.call_oi_wall_strike)), "CE"),
+        (int(round(pos.max_pain_strike)), "PE"),
+        (int(round(pos.max_pain_strike)), "CE"),
+    }
+    for m_leg in _COMPACT_LEG_RE.finditer(text):
+        k_int = int(m_leg.group("strike"))
+        opt = m_leg.group("opt")
+        side_tok = m_leg.group("side")
+        ratio_tok = m_leg.group("ratio")
+        r_int = int(ratio_tok) if ratio_tok else None
+        exp_side: str | None = None
+        if side_tok:
+            exp_side = "SHORT" if side_tok in ("S", "SHORT") else "LONG"
+        checked += 1
+        if not is_digest and side_tok is None and ratio_tok is None and (k_int, opt) in oi_ref_strikes:
+            continue
+        if not scoped_candidates or not any(
+            _leg_matches_candidate(c, k_int, opt, exp_side, r_int) for c in scoped_candidates
+        ):
+            errors.append(f"{field_name}:WRONG_LEG_SPEC:{m_leg.group(0).strip()}")
+
+    # 6. Expiry date, DTE, and Net Credit / Debit claims
+    text_no_sids = _STRUCT_ID_RE.sub(" ", text)
+    if is_digest:
+        allowed_dates = {selected_primary.expiry_date} if selected_primary is not None else set()
+    else:
+        allowed_dates = (
+            {c.expiry_date for c in scoped_candidates}
+            | {e.event_date for e in state.market_evidence.event_calendar.events_within_dte}
+            | {state.run_metadata.decision_timestamp_ist[:10]}
+        )
+    for dt_str in _DATE_RE.findall(text_no_sids):
+        checked += 1
+        if dt_str not in allowed_dates:
+            errors.append(f"{field_name}:WRONG_DATE_OR_EXPIRY:{dt_str}")
+
+    for m_dte in re.finditer(r"\b(\d+)\s*DTE\b", text, re.IGNORECASE):
+        dte_val = int(m_dte.group(1))
+        checked += 1
+        allowed_dtes = {c.dte_trading_sessions for c in scoped_candidates}
+        if not allowed_dtes or dte_val not in allowed_dtes:
+            errors.append(f"{field_name}:WRONG_DTE:{dte_val}!=expected:{sorted(allowed_dtes)}")
+
+    for m_entry in re.finditer(
+        r"\bNet\s+(Credit|Debit)\s+([0-9]+(?:\.[0-9]+)?)\s*pts", text, re.IGNORECASE
+    ):
+        checked += 1
+        got_credit = m_entry.group(1).lower() == "credit"
+        pts_v = float(m_entry.group(2))
+        if not scoped_candidates or not any(
+            c.is_net_credit == got_credit
+            and abs(pts_v - c.executable_net_points_per_unit) <= 0.25
+            for c in scoped_candidates
+        ):
+            errors.append(f"{field_name}:WRONG_NET_ENTRY:{m_entry.group(0)}")
+
+    return checked
+
+
 def validate_supplied_digest(
     digest: str,
     state: NiftyOptionsState,
@@ -198,6 +520,8 @@ def validate_supplied_digest(
         checked += 1
         errors.append("digest:FALSE_LIVE_READY_CLAIM")
 
+    allowed_upper_words = _allowed_upper_words_for_state(state)
+
     if selected_primary is None:
         for sid in _STRUCT_ID_RE.findall(text):
             checked += 1
@@ -208,10 +532,16 @@ def validate_supplied_digest(
         if re.search(r"\b(?:Buy|Sell|Short|Long)\s+[A-Za-z0-9_]{3,}", text, re.IGNORECASE):
             checked += 1
             errors.append("digest:TRADE_CALL_ON_WAIT")
-        for m_leg in _COMPACT_LEG_RE.finditer(text):
-            if m_leg.group("side"):
-                checked += 1
-                errors.append(f"digest:LEG_ORDER_ON_WAIT:{m_leg.group(0)}")
+        checked += _check_trade_directives_quantities_and_symbols(
+            field_name="digest",
+            text=text,
+            state=state,
+            scoped_candidates=[],
+            selected_primary=None,
+            allowed_upper_words=allowed_upper_words,
+            errors=errors,
+            is_digest=True,
+        )
         return checked, errors
 
     # `selected_primary` is non-None: EVERY trade field in digest must match `selected_primary` ONLY
@@ -234,84 +564,16 @@ def validate_supplied_digest(
         if tok not in allowed_enum_tokens:
             errors.append(f"digest:WRONG_CONTRACT_TOKEN:{tok}")
 
-    for dt_str in _DATE_RE.findall(text):
-        checked += 1
-        if dt_str != selected_primary.expiry_date:
-            errors.append(
-                f"digest:WRONG_EXPIRY:{dt_str}!=expected:{selected_primary.expiry_date}"
-            )
-
-    # Validate any DTE claim
-    for m_dte in re.finditer(r"\b(\d+)\s*DTE\b", text, re.IGNORECASE):
-        checked += 1
-        if int(m_dte.group(1)) != selected_primary.dte_trading_sessions:
-            errors.append(
-                f"digest:WRONG_DTE:{m_dte.group(1)}!=expected:{selected_primary.dte_trading_sessions}"
-            )
-
-    # Validate lot & unit quantity claims
-    expected_qty = selected_primary.lot_size * selected_primary.lots
-    for m_lot in re.finditer(r"\b(\d+)\s*lots?\b", text, re.IGNORECASE):
-        checked += 1
-        if int(m_lot.group(1)) != selected_primary.lots:
-            errors.append(f"digest:WRONG_LOTS:{m_lot.group(1)}!=expected:{selected_primary.lots}")
-    for m_qty in re.finditer(r"\b(\d+)\s*(?:qty|units)\b", text, re.IGNORECASE):
-        checked += 1
-        if int(m_qty.group(1)) != expected_qty:
-            errors.append(f"digest:WRONG_QUANTITY:{m_qty.group(1)}!=expected:{expected_qty}")
-
-    # Validate leg strike / option_type / side / ratio against selected_primary.legs
-    legs_by_key = {(int(round(l.strike)), l.option_type): l for l in selected_primary.legs}
-    for m_leg in _COMPACT_LEG_RE.finditer(text):
-        k_int = int(m_leg.group("strike"))
-        opt = m_leg.group("opt")
-        side_tok = m_leg.group("side")
-        ratio_tok = m_leg.group("ratio")
-        checked += 1
-        actual_leg = legs_by_key.get((k_int, opt))
-        if actual_leg is None:
-            errors.append(f"digest:WRONG_LEG_STRIKE_OR_TYPE:{k_int}{opt}")
-            continue
-        if side_tok:
-            exp_short = actual_leg.side == "SHORT"
-            got_short = side_tok in ("S", "SHORT")
-            if exp_short != got_short:
-                errors.append(
-                    f"digest:WRONG_LEG_SIDE:{side_tok}_{k_int}{opt}!=expected:{actual_leg.side}"
-                )
-        if ratio_tok and int(ratio_tok) != actual_leg.ratio:
-            errors.append(
-                f"digest:WRONG_LEG_RATIO:{ratio_tok}x_{k_int}{opt}!=expected:{actual_leg.ratio}x"
-            )
-
-    for m_vleg in _VERB_LEG_RE.finditer(text):
-        verb = m_vleg.group("verb").upper()
-        k_int = int(m_vleg.group("strike"))
-        opt = m_vleg.group("opt").upper()
-        checked += 1
-        actual_leg = legs_by_key.get((k_int, opt))
-        if actual_leg is None:
-            errors.append(f"digest:WRONG_VERB_LEG:{verb}_{k_int}{opt}")
-            continue
-        got_side = "LONG" if verb in ("BUY", "LONG") else "SHORT"
-        if got_side != actual_leg.side:
-            errors.append(
-                f"digest:WRONG_VERB_SIDE:{verb}_{k_int}{opt}!=expected:{actual_leg.side}"
-            )
-
-    # Validate Net Credit / Net Debit direction if stated
-    for m_entry in re.finditer(
-        r"\bNet\s+(Credit|Debit)\s+([0-9]+(?:\.[0-9]+)?)\s*pts", text, re.IGNORECASE
-    ):
-        checked += 1
-        got_credit = m_entry.group(1).lower() == "credit"
-        if got_credit != selected_primary.is_net_credit:
-            errors.append(f"digest:WRONG_CREDIT_DEBIT_SIDE:{m_entry.group(1)}")
-        pts_v = float(m_entry.group(2))
-        if abs(pts_v - selected_primary.executable_net_points_per_unit) > 0.25:
-            errors.append(
-                f"digest:WRONG_ENTRY_POINTS:{pts_v}!=expected:{selected_primary.executable_net_points_per_unit}"
-            )
+    checked += _check_trade_directives_quantities_and_symbols(
+        field_name="digest",
+        text=text,
+        state=state,
+        scoped_candidates=[selected_primary],
+        selected_primary=selected_primary,
+        allowed_upper_words=allowed_upper_words,
+        errors=errors,
+        is_digest=True,
+    )
 
     # Candidate-scoped Rupee check (ONLY selected_primary's rupee figures + policy caps allowed!)
     allowed_selected_rs = [
@@ -511,6 +773,7 @@ def _scan_prose_fields_semantically(
     market_nums = _market_non_candidate_numbers(state_dict)
     cand_by_id = {c.structure_id: c for c in state.candidate_structures}
     allowed_tokens = _allowed_tokens_for_state(state)
+    allowed_upper_words = _allowed_upper_words_for_state(state)
 
     checked_count = 0
     uncited: list[str] = []
@@ -577,6 +840,17 @@ def _scan_prose_fields_semantically(
                 scoped_cands: list[CandidateStructure] = [cand_by_id[sid] for sid in mentioned_ids]
             else:
                 scoped_cands = [selected_primary] if selected_primary is not None else []
+
+            checked_count += _check_trade_directives_quantities_and_symbols(
+                field_name=field_name,
+                text=sent,
+                state=state,
+                scoped_candidates=scoped_cands,
+                selected_primary=selected_primary,
+                allowed_upper_words=allowed_upper_words,
+                errors=uncited,
+                is_digest=False,
+            )
 
             checked_count += _check_sentence_semantic_labels(
                 field_name=field_name,
@@ -687,6 +961,11 @@ def verify_llm_synthesis(
         key = f"prose_text_{idx_p}"
         if txt and txt not in merged_prose_fields.values():
             merged_prose_fields[key] = txt
+
+    for idx_c, item in enumerate(raw_citations):
+        ctext = str(item.get("claim_text", "")).strip()
+        if ctext:
+            merged_prose_fields[f"citation_claim_{idx_c}"] = ctext
 
     prose_checked, uncited_prose = _scan_prose_fields_semantically(
         state=state,

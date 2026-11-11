@@ -628,6 +628,11 @@ def reconstruct_state_from_snapshot_doc(snapshot_doc: dict[str, Any]) -> NiftyOp
                     if ld.get("vwap_fill_price") is not None
                     else None
                 ),
+                executable_entry_price=(
+                    float(ld["executable_entry_price"])
+                    if ld.get("executable_entry_price") is not None
+                    else None
+                ),
                 fill_basis=ld.get("fill_basis", "FULL_SIZE_TOUCH"),
             )
             for ld in cd["legs"]

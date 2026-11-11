@@ -1302,3 +1302,521 @@ def test_item5_live_readiness_gates_off_degraded_surface_uncovered_held_and_aler
     assert slot_res.executed is True
     assert slot_res.delivery is not None
     assert slot_res.delivery.alerted_trader is False
+
+
+# ============================================================================
+# TARGETED POST-REVIEW REGRESSION CHECKS (FIXES 1, 2, AND 3)
+# ============================================================================
+
+
+def test_targeted_fix1_other_report_text_buy_999_units_and_buy_banknifty_rejected(
+    tmp_path: Path,
+) -> None:
+    """Reject 'Buy 999 units', 'Buy BANKNIFTY', wrong quantities/symbols/legs across ALL report text fields."""
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    base_cfg = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "base_t1.jsonl"),
+    )
+    base_state, _ = run_analyst_pipeline(dec_dt, base_cfg)
+    assert (
+        base_state.final_output is not None
+        and base_state.final_output.primary_proposal is not None
+    )
+    cand = base_state.final_output.primary_proposal
+    leg0 = cand.legs[0]
+    wrong_verb = "Buy" if leg0.side == "SHORT" else "Sell"
+
+    # Every one of the 12 report prose fields + citations claim_text + digest must reject
+    # both "Buy 999 units" and "Buy BANKNIFTY" (plus wrong lots, symbols, leg sides, DTE, expiry).
+    field_setters = {
+        "reasoning_summary": lambda r, s: dataclasses.replace(r, reasoning_summary=s),
+        "habitual_comparison_note": lambda r, s: dataclasses.replace(
+            r, habitual_comparison_note=s
+        ),
+        "research_rule_challenge_note": lambda r, s: dataclasses.replace(
+            r, research_rule_challenge_note=s
+        ),
+        "confidence_note": lambda r, s: dataclasses.replace(r, confidence_note=s),
+        "bull_thesis": lambda r, s: dataclasses.replace(
+            r, debate_state=dataclasses.replace(r.debate_state, bull_thesis=s)  # type: ignore[arg-type]
+        ),
+        "bear_thesis": lambda r, s: dataclasses.replace(
+            r, debate_state=dataclasses.replace(r.debate_state, bear_thesis=s)  # type: ignore[arg-type]
+        ),
+        "vol_regime_thesis": lambda r, s: dataclasses.replace(
+            r, debate_state=dataclasses.replace(r.debate_state, vol_regime_thesis=s)  # type: ignore[arg-type]
+        ),
+        "rebuttal_round": lambda r, s: dataclasses.replace(
+            r, debate_state=dataclasses.replace(r.debate_state, rebuttal_round=s)  # type: ignore[arg-type]
+        ),
+        "convexity_advocate_note": lambda r, s: dataclasses.replace(
+            r, risk_triad_state=dataclasses.replace(r.risk_triad_state, convexity_advocate_note=s)  # type: ignore[arg-type]
+        ),
+        "tail_guardian_note": lambda r, s: dataclasses.replace(
+            r, risk_triad_state=dataclasses.replace(r.risk_triad_state, tail_guardian_note=s)  # type: ignore[arg-type]
+        ),
+        "neutral_arbiter_note": lambda r, s: dataclasses.replace(
+            r, risk_triad_state=dataclasses.replace(r.risk_triad_state, neutral_arbiter_note=s)  # type: ignore[arg-type]
+        ),
+        "final_recommendation_rationale": lambda r, s: dataclasses.replace(
+            r,
+            consolidator_state=dataclasses.replace(
+                r.consolidator_state, final_recommendation_rationale=s  # type: ignore[arg-type]
+            ),
+        ),
+        "whatsapp_digest": lambda r, s: dataclasses.replace(
+            r,
+            consolidator_state=dataclasses.replace(
+                r.consolidator_state, whatsapp_digest=s  # type: ignore[arg-type]
+            ),
+        ),
+        "citation_claim": lambda r, s: dataclasses.replace(
+            r,
+            citations=[{**r.citations[0], "claim_text": s}, *r.citations[1:]],
+        ),
+    }
+
+    for poison_label, poison_snippet, forbidden_token in (
+        ("buy_999_units", f"`{cand.structure_id}` setup. Buy 999 units immediately.", "999 units"),
+        ("buy_banknifty", f"`{cand.structure_id}` setup. Buy BANKNIFTY immediately.", "BANKNIFTY"),
+    ):
+        for fname, setter in field_setters.items():
+            audit_p = tmp_path / f"t1_{poison_label}_{fname}.jsonl"
+            cfg_i = AnalystConfig(
+                mode="OFFLINE",
+                fixtures_dir=str(FIXTURES_DIR),
+                audit_log_path=str(audit_p),
+            )
+            st_i, deliv_i = run_analyst_pipeline(
+                dec_dt,
+                cfg_i,
+                llm_provider=_StaticOverrideProvider(
+                    lambda resp, _s, _p, _a, fn=setter, txt=poison_snippet: fn(resp, txt)
+                ),
+            )
+            assert st_i.final_output is not None, (poison_label, fname)
+            assert st_i.final_output.verifier_report.passed_verification is False, (
+                poison_label,
+                fname,
+            )
+            assert st_i.final_output.verdict == "WAIT", (poison_label, fname)
+            assert st_i.final_output.primary_proposal is None, (poison_label, fname)
+            assert deliv_i.alerted_trader is False, (poison_label, fname)
+            assert forbidden_token not in deliv_i.full_report_markdown, (poison_label, fname)
+            assert forbidden_token not in st_i.final_output.whatsapp_digest, (poison_label, fname)
+            audit_row = json.loads(audit_p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            assert audit_row["final_output"]["verdict"] == "WAIT"
+            assert audit_row["final_output"]["llm_citations"] == []
+
+    # Additional prose trade-mismatch variants inside non-digest report prose (`bull_thesis` / `tail_guardian_note`)
+    extra_prose_poisons = [
+        "bare_999_units",
+        "wrong_lots_count",
+        "bank_nifty_spaced",
+        "sell_finnifty",
+        "buy_reliance",
+        "buy_nifty_futures",
+        "wrong_verb_leg_side",
+        "wrong_dte_in_prose",
+        "wrong_expiry_in_prose",
+    ]
+    extra_snippets = {
+        "bare_999_units": "Position size is 999 units.",
+        "wrong_lots_count": "Recommended size is 4 lots.",
+        "bank_nifty_spaced": "Rotate into Bank Nifty options.",
+        "sell_finnifty": "Sell FINNIFTY straddle instead.",
+        "buy_reliance": "Buy RELIANCE calls on breakout.",
+        "buy_nifty_futures": "Buy NIFTY futures alongside the spread.",
+        "wrong_verb_leg_side": f"{wrong_verb} {int(leg0.strike)} {leg0.option_type} at market.",
+        "wrong_dte_in_prose": f"`{cand.structure_id}` has 99 DTE remaining.",
+        "wrong_expiry_in_prose": f"`{cand.structure_id}` expires on 2026-12-31.",
+    }
+    for tag in extra_prose_poisons:
+        txt = extra_snippets[tag]
+        cfg_x = AnalystConfig(
+            mode="OFFLINE",
+            fixtures_dir=str(FIXTURES_DIR),
+            audit_log_path=str(tmp_path / f"extra_{tag}.jsonl"),
+        )
+        st_x, deliv_x = run_analyst_pipeline(
+            dec_dt,
+            cfg_x,
+            llm_provider=_StaticOverrideProvider(
+                lambda resp, _s, _p, _a, s=txt: dataclasses.replace(
+                    resp,
+                    debate_state=dataclasses.replace(resp.debate_state, bull_thesis=s),  # type: ignore[arg-type]
+                )
+            ),
+        )
+        assert st_x.final_output is not None and not st_x.final_output.verifier_report.passed_verification, tag
+        assert st_x.final_output.verdict == "WAIT", tag
+        assert deliv_x.alerted_trader is False, tag
+
+
+def test_targeted_fix2_run_started_at_179s_finishing_at_190s_fails_before_final_output(
+    tmp_path: Path,
+) -> None:
+    """A run started at 179s that finishes at 190s fails closed at the pre-output deadline check."""
+    assert ("time." + "sleep") not in inspect.getsource(
+        test_targeted_fix2_run_started_at_179s_finishing_at_190s_fails_before_final_output
+    )
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    t_capture_start = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    t_capture_end = dt.datetime(2026, 11, 6, 10, 15, 2, tzinfo=IST)
+
+    # 1. Agent-artifact resume: started at 179.0s (passes entry), finishes at 190.0s -> REJECTED!
+    art = tmp_path / "late_finish.json"
+    chart_dir = tmp_path / "charts_late"
+    audit_late = tmp_path / "late_audit.jsonl"
+    cfg = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(audit_late),
+        payoff_chart_dir=str(chart_dir),
+        llm_provider="agent_artifact",
+        agent_synthesis_artifact_path=str(art),
+    )
+    cap_ticks = iter([t_capture_start, t_capture_end])
+    with pytest.raises(FileNotFoundError):
+        run_analyst_pipeline(dec_dt, cfg, wall_clock_fn=lambda: next(cap_ticks, t_capture_end))
+
+    _, req_p, _, _ = snapshot_paths_for_artifact(art)
+    req_doc = json.loads(req_p.read_text(encoding="utf-8"))
+    _write_valid_agent_artifact(art, req_doc)
+
+    resume_ticks_179_to_190 = iter(
+        [
+            t_capture_start + dt.timedelta(seconds=179.0),
+            t_capture_start + dt.timedelta(seconds=190.0),
+        ]
+    )
+    with pytest.raises(StaleEvidenceSnapshotError, match="SNAPSHOT_RESUME_EXPIRED_180S"):
+        run_analyst_pipeline(
+            dec_dt,
+            cfg,
+            wall_clock_fn=lambda: next(
+                resume_ticks_179_to_190, t_capture_start + dt.timedelta(seconds=190.0)
+            ),
+        )
+    assert not audit_late.exists()
+    assert list(chart_dir.glob("*.png")) == []
+
+    # 2. Control: started at 179.0s and finishing at 180.0s (exact deadline) -> SUCCEEDS!
+    resume_ticks_179_to_180 = iter(
+        [
+            t_capture_start + dt.timedelta(seconds=179.0),
+            t_capture_start + dt.timedelta(seconds=180.0),
+        ]
+    )
+    st_ok, _ = run_analyst_pipeline(
+        dec_dt,
+        cfg,
+        wall_clock_fn=lambda: next(
+            resume_ticks_179_to_180, t_capture_start + dt.timedelta(seconds=180.0)
+        ),
+    )
+    assert st_ok.final_output is not None and st_ok.final_output.verdict == "SUGGESTION"
+
+    # 3. Single-shot fresh run: capture completes at 179.0s, synthesis finishes at 190.0s -> REJECTED!
+    fresh_chart_dir = tmp_path / "charts_fresh_late"
+    fresh_audit = tmp_path / "fresh_late.jsonl"
+    cfg_fresh = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(fresh_audit),
+        payoff_chart_dir=str(fresh_chart_dir),
+    )
+    clock_state = {"now": t_capture_start}
+
+    def _advancing_synth(resp: LLMSynthesisResponse, _s, _p, _a):
+        # Synthesis finishes at 190.0s after capture_started_at_ist
+        clock_state["now"] = t_capture_start + dt.timedelta(seconds=190.0)
+        return resp
+
+    fresh_ticks = iter(
+        [
+            t_capture_start,
+            t_capture_start + dt.timedelta(seconds=179.0),
+        ]
+    )
+    with pytest.raises(StaleEvidenceSnapshotError, match="SNAPSHOT_RESUME_EXPIRED_180S"):
+        run_analyst_pipeline(
+            dec_dt,
+            cfg_fresh,
+            llm_provider=_StaticOverrideProvider(_advancing_synth),
+            wall_clock_fn=lambda: next(fresh_ticks, clock_state["now"]),
+        )
+    assert not fresh_audit.exists()
+    assert list(fresh_chart_dir.glob("*.png")) == []
+
+
+def test_targeted_fix3_payoff_chart_uses_walked_prices_not_touch_quotes_and_agrees(
+    tmp_path: Path,
+) -> None:
+    """Payoff chart uses the selected trade's walked fill prices and strictly agrees on risk numbers."""
+    from nifty_analyst.engine.pricing import LegPayoffSpec, compute_piecewise_expiry_payoff
+    from nifty_analyst.output.payoff_diagram import (
+        candidate_to_payoff_specs,
+        render_candidate_payoff_diagram,
+        render_payoff_diagram,
+    )
+    import importlib.util
+
+    has_mpl = importlib.util.find_spec("matplotlib") is not None
+
+    # 1. Build a 150-pt Bull Put Spread (lot_size=65, 1 lot) that PASSes Part A after book walk,
+    #    where touch quotes (1 unit @ 100/101 and 39/40) differ sharply from 65-unit walked fills
+    #    (64 units @ 92 and 46).
+    q_ts = "2026-11-06T10:15:00+05:30"
+    short_raw = RawStrikeQuote(
+        strike=24150.0,
+        call_bid=250.0,
+        call_ask=252.0,
+        put_bid=100.0,
+        put_ask=101.0,
+        call_oi=90000,
+        put_oi=120000,
+        call_volume=12000,
+        put_volume=30000,
+        call_depth_lots=10,
+        put_depth_lots=10,
+        quote_timestamp_ist=q_ts,
+        put_touch_bid_qty=1,
+        put_touch_ask_qty=1,
+        put_visible_buy_qty=650,
+        put_visible_sell_qty=650,
+        put_buy_levels=[[100.0, 1], [92.0, 649]],
+        put_sell_levels=[[101.0, 1], [108.0, 649]],
+    )
+    long_raw = RawStrikeQuote(
+        strike=24000.0,
+        call_bid=380.0,
+        call_ask=382.0,
+        put_bid=39.0,
+        put_ask=40.0,
+        call_oi=50000,
+        put_oi=95000,
+        call_volume=8000,
+        put_volume=22000,
+        call_depth_lots=10,
+        put_depth_lots=10,
+        quote_timestamp_ist=q_ts,
+        put_touch_bid_qty=1,
+        put_touch_ask_qty=1,
+        put_visible_buy_qty=650,
+        put_visible_sell_qty=650,
+        put_buy_levels=[[39.0, 1], [32.0, 649]],
+        put_sell_levels=[[40.0, 1], [46.0, 649]],
+    )
+
+    cfg_u = AnalystConfig()
+    short_leg = build_option_leg(
+        short_raw, "PE", "SHORT", 1, 24570.0, 20.0 / 365.0, 0.067, False, cfg_u
+    )
+    long_leg = build_option_leg(
+        long_raw, "PE", "LONG", 1, 24570.0, 20.0 / 365.0, 0.067, False, cfg_u
+    )
+    from nifty_analyst.state import CandleBar
+
+    bar_1d = CandleBar(
+        timeframe="1d",
+        open_time_ist="2026-11-05T09:15:00+05:30",
+        close_time_ist="2026-11-05T15:30:00+05:30",
+        open=24400.0,
+        high=24580.0,
+        low=24380.0,
+        close=24540.0,
+    )
+    bar_1h = CandleBar(
+        timeframe="1h",
+        open_time_ist="2026-11-06T09:15:00+05:30",
+        close_time_ist="2026-11-06T10:15:00+05:30",
+        open=24510.0,
+        high=24565.0,
+        low=24495.0,
+        close=24550.0,
+    )
+    ps = PriceStructureEvidence(
+        trend_1d_state="UPTREND",
+        higher_high_higher_low_repaired=True,
+        first_pullback_in_downtrend_warning=False,
+        rsi_14_1h=58.0,
+        atr_14_1h=65.0,
+        atr_14_1d=190.0,
+        stretch_zscore_1h=0.4,
+        ma20_1h=24180.0,
+        ema50_1h=24120.0,
+        last_completed_1d_bar=bar_1d,
+        last_completed_1h_bar=bar_1h,
+        final_15m_bar_completed=True,
+        stripped_forming_bars_count=0,
+        verified_level_touches=[],
+    )
+    vol = VolatilityEvidence(
+        india_vix=TimestampedDatum.create(
+            14.2,
+            dt.datetime(2026, 11, 6, 10, 15, tzinfo=IST),
+            dt.datetime(2026, 11, 6, 10, 15, tzinfo=IST),
+            "vix",
+            180,
+            "VERIFIED",
+        ),
+        atm_iv_by_expiry={"2026-11-26": 0.14},
+        constant_maturity_30d_iv=0.14,
+        eod_cm30_latest=0.14,
+        iv_source_label="LIVE_MID_INFERRED",
+        ivp_30d=60.0,
+        ivp_90d=62.0,
+        ivp_252d=58.0,
+        iv_history_sessions_count=252,
+        iv_history_gaps_flagged=[],
+        realized_vol_20d=0.12,
+        iv_rv_spread=0.02,
+        skew_25d_put_minus_call=0.01,
+        wing_curvature=0.005,
+        chain_qa_passed=True,
+        chain_qa_notes=[],
+    )
+    exp_meta = ExpiryMetadata(
+        expiry_date="2026-11-26",
+        expiry_timestamp_ist="2026-11-26T15:30:00+05:30",
+        dte_trading_sessions=10,
+        lot_size=65,
+        is_holiday_adjusted=False,
+        is_monthly=True,
+    )
+    port_state = build_portfolio_exposure_state([], portfolio_cap_rs=10000.0)
+
+    cand = build_candidate_structure(
+        structure_id="BPS_2026-11-26_24150_24000",
+        structure_type="BULL_PUT_SPREAD",
+        direction="BULLISH",
+        expiry=exp_meta,
+        legs=[short_leg, long_leg],
+        spot=24550.0,
+        implied_forward=24570.0,
+        atm_iv=0.14,
+        time_to_expiry_years=20.0 / 365.0,
+        empirical_daily_log_returns=[0.004, -0.003] * 25,
+        invalidation_level=24450.0,
+        invalidation_candle_basis="COMPLETED_1H_CLOSE",
+        invalidation_justification="Below 1H support.",
+        matches_part_b_style=True,
+        portfolio_state=port_state,
+        price_structure=ps,
+        volatility=vol,
+        config=cfg_u,
+    )
+    assert cand.execution_fill_basis == "FULL_SIZE_BOOK_WALK"
+    assert cand.full_size_fill_supported is True
+    assert cand.part_a_overall_status == "PASS"
+
+    # Naive touch specs disagree sharply (~Rs 896 difference in contractual max loss!)
+    slip = cfg_u.slippage_buffer_points_per_leg
+    naive_touch_specs = [
+        LegPayoffSpec(
+            strike=l.strike,
+            option_type=l.option_type,
+            side=l.side,
+            ratio=l.ratio,
+            executable_entry_price=(l.bid - slip if l.side == "SHORT" else l.ask + slip),
+        )
+        for l in cand.legs
+    ]
+    pw_naive = compute_piecewise_expiry_payoff(
+        naive_touch_specs, cand.lot_size, cand.lots, cand.statutory_charges.total_charges_rs
+    )
+    assert abs(pw_naive.gross_max_loss_rs - cand.contractual_max_loss_rs) > 800.0
+
+    # Walked payoff specs match candidate risk numbers identically!
+    walked_specs = candidate_to_payoff_specs(cand, slippage_buffer_points_per_leg=slip)
+    pw_walked = compute_piecewise_expiry_payoff(
+        walked_specs, cand.lot_size, cand.lots, cand.statutory_charges.total_charges_rs
+    )
+    assert abs(pw_walked.gross_max_loss_rs - cand.contractual_max_loss_rs) < 0.02
+    assert abs(pw_walked.max_profit_rs - cand.max_profit_rs) < 0.02
+    assert pw_walked.breakevens_net == cand.breakevens_net
+
+    if has_mpl:
+        walked_png = tmp_path / "walked_cand.png"
+        naive_png = tmp_path / "naive_touch.png"
+        diag = render_candidate_payoff_diagram(cand, str(walked_png), slip)
+        assert abs(diag["gross_max_loss_rs"] - cand.contractual_max_loss_rs) < 0.02
+        assert abs(diag["max_profit_rs"] - cand.max_profit_rs) < 0.02
+        assert diag["breakevens_net"] == cand.breakevens_net
+
+        render_payoff_diagram(
+            naive_touch_specs,
+            cand.lot_size,
+            cand.lots,
+            cand.statutory_charges.total_charges_rs,
+            f"{cand.structure_id} ({cand.structure_type})",
+            str(naive_png),
+        )
+        assert walked_png.read_bytes() != naive_png.read_bytes()
+
+        # Tampered candidate risk numbers fail closed and delete the PNG
+        tampered_cand = dataclasses.replace(
+            cand, contractual_max_loss_rs=pw_naive.gross_max_loss_rs
+        )
+        bad_png = tmp_path / "bad_mismatch.png"
+        with pytest.raises(ValueError, match="PAYOFF_CHART_RISK_MISMATCH"):
+            render_candidate_payoff_diagram(tampered_cand, str(bad_png), slip)
+        assert not bad_png.exists()
+
+        # End-to-end pipeline run with walked books renders the walked-price chart, not touch!
+        class _WalkedChainAdapter(FixtureKotakNeoAdapter):
+            def fetch_option_chain_raw(self, expiry_date: str, decision_dt_ist: dt.datetime):
+                raw = json.loads(
+                    json.dumps(super().fetch_option_chain_raw(expiry_date, decision_dt_ist))
+                )
+                for row in raw["strikes"]:
+                    for prefix, b_key, a_key in (
+                        ("call", "call_bid", "call_ask"),
+                        ("put", "put_bid", "put_ask"),
+                    ):
+                        bid_v = float(row[b_key])
+                        ask_v = float(row[a_key])
+                        row[f"{prefix}_touch_bid_qty"] = 1
+                        row[f"{prefix}_touch_ask_qty"] = 1
+                        row[f"{prefix}_visible_buy_qty"] = 750
+                        row[f"{prefix}_visible_sell_qty"] = 750
+                        row[f"{prefix}_buy_levels"] = [
+                            [bid_v, 1],
+                            [round(max(0.10, bid_v - 3.5), 2), 749],
+                        ]
+                        row[f"{prefix}_sell_levels"] = [
+                            [ask_v, 1],
+                            [round(ask_v + 3.5, 2), 749],
+                        ]
+                return raw
+
+        pipe_charts = tmp_path / "pipe_walked_charts"
+        cfg_pipe = AnalystConfig(
+            mode="OFFLINE",
+            fixtures_dir=str(FIXTURES_DIR),
+            audit_log_path=str(tmp_path / "pipe_walked.jsonl"),
+            payoff_chart_dir=str(pipe_charts),
+        )
+        st_w, _ = run_analyst_pipeline(
+            dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST),
+            cfg_pipe,
+            broker_adapter=_WalkedChainAdapter(FIXTURES_DIR),
+        )
+        assert st_w.final_output is not None
+        assert st_w.final_output.verdict == "SUGGESTION"
+        sel_w = st_w.final_output.primary_proposal
+        assert sel_w is not None
+        assert sel_w.execution_fill_basis == "FULL_SIZE_BOOK_WALK"
+        rendered_p = Path(st_w.final_output.payoff_diagram_path)
+        assert rendered_p.is_file()
+
+        expected_walked_p = tmp_path / "expected_pipe_walked.png"
+        render_candidate_payoff_diagram(
+            sel_w, str(expected_walked_p), cfg_pipe.slippage_buffer_points_per_leg
+        )
+        assert rendered_p.read_bytes() == expected_walked_p.read_bytes()
+
