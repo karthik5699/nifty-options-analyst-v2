@@ -1,0 +1,37 @@
+{
+  "symbol": "NIFTY",
+  "spot": {
+    "value": 24200.0,
+    "as_of_ist": "2026-11-06T10:14:40+05:30",
+    "source_id": "kotak_neo_scrip_master_fixture",
+    "verification_tag": "UNVERIFIED_SDK_SCHEMA"
+  },
+  "expected_calendar_expiries": [
+    "2026-11-12",
+    "2026-11-19",
+    "2026-11-23"
+  ],
+  "expiries": [
+    {
+      "expiry_date": "2026-11-12",
+      "lot_size": 75,
+      "is_holiday_adjusted": false,
+      "holiday_note": "",
+      "is_monthly": false
+    },
+    {
+      "expiry_date": "2026-11-19",
+      "lot_size": 75,
+      "is_holiday_adjusted": false,
+      "holiday_note": "",
+      "is_monthly": false
+    },
+    {
+      "expiry_date": "2026-11-23",
+      "lot_size": 50,
+      "is_holiday_adjusted": true,
+      "holiday_note": "Monthly expiry shifted to Monday 23 Nov 2026 ahead of 24 Nov 2026 NSE holiday; lot size revised to 50.",
+      "is_monthly": true
+    }
+  ]
+}

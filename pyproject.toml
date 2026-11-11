@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nifty-options-analyst"
+version = "0.3.0"
+description = "Read-only NIFTY 50 Index Options Research & Strategy Analyst (Phase 0 & Phase 1 - Implementation Plan v3)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary - Research Only"}
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+nifty-analyst = "nifty_analyst.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v"

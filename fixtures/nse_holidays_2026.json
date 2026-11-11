@@ -1,0 +1,42 @@
+{
+  "exchange": "NSE",
+  "year": 2026,
+  "holidays": [
+    {
+      "date": "2026-01-26",
+      "description": "Republic Day"
+    },
+    {
+      "date": "2026-03-03",
+      "description": "Holi"
+    },
+    {
+      "date": "2026-04-03",
+      "description": "Good Friday"
+    },
+    {
+      "date": "2026-04-14",
+      "description": "Dr. Baba Saheb Ambedkar Jayanti"
+    },
+    {
+      "date": "2026-05-01",
+      "description": "Maharashtra Day"
+    },
+    {
+      "date": "2026-10-02",
+      "description": "Mahatma Gandhi Jayanti"
+    },
+    {
+      "date": "2026-11-10",
+      "description": "Diwali Balipratipada"
+    },
+    {
+      "date": "2026-11-24",
+      "description": "Guru Nanak Jayanti (Shifts Nov Monthly Expiry to Monday 23 Nov 2026)"
+    },
+    {
+      "date": "2026-12-25",
+      "description": "Christmas"
+    }
+  ]
+}

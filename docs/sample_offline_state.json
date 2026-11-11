@@ -1,0 +1,2908 @@
+{
+  "run_metadata": {
+    "run_id": "run_20261106_101500_5f7fb9",
+    "decision_timestamp_ist": "2026-11-06T10:15:00+05:30",
+    "mode": "OFFLINE",
+    "data_version_hash": "410cb203281165c4",
+    "model_ids": [
+      "qwen2.5:14b-instruct"
+    ],
+    "config_hash": "5f7fb995dc54670f",
+    "scheduled_slot_approved": true
+  },
+  "contract_context": {
+    "symbol": "NIFTY",
+    "spot": {
+      "value": 24200.0,
+      "as_of_ist": "2026-11-06T10:14:40+05:30",
+      "fetched_at_ist": "2026-11-06T10:15:00+05:30",
+      "source_id": "kotak_neo_scrip_master_fixture",
+      "max_staleness_seconds": 180,
+      "is_stale": false,
+      "verification_tag": "UNVERIFIED_SDK_SCHEMA"
+    },
+    "active_expiries": [
+      {
+        "expiry_date": "2026-11-12",
+        "expiry_timestamp_ist": "2026-11-12T15:30:00+05:30",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "is_holiday_adjusted": false,
+        "holiday_note": "",
+        "is_monthly": false
+      },
+      {
+        "expiry_date": "2026-11-19",
+        "expiry_timestamp_ist": "2026-11-19T15:30:00+05:30",
+        "dte_trading_sessions": 8,
+        "lot_size": 75,
+        "is_holiday_adjusted": false,
+        "holiday_note": "",
+        "is_monthly": false
+      },
+      {
+        "expiry_date": "2026-11-23",
+        "expiry_timestamp_ist": "2026-11-23T15:30:00+05:30",
+        "dte_trading_sessions": 10,
+        "lot_size": 50,
+        "is_holiday_adjusted": true,
+        "holiday_note": "Monthly expiry shifted to Monday 23 Nov 2026 ahead of 24 Nov 2026 NSE holiday; lot size revised to 50.",
+        "is_monthly": true
+      }
+    ],
+    "lot_size_change_detected": true,
+    "calendar_discrepancy_warnings": []
+  },
+  "portfolio_exposure_state": {
+    "open_positions": [],
+    "summed_planned_stops_rs": 0,
+    "remaining_stop_budget_rs": 10000.0,
+    "directional_exposure_groups": {
+      "BULLISH": [],
+      "BEARISH": [],
+      "NEUTRAL": []
+    }
+  },
+  "market_evidence": {
+    "price_structure": {
+      "trend_1d_state": "UPTREND",
+      "higher_high_higher_low_repaired": true,
+      "first_pullback_in_downtrend_warning": false,
+      "ma20_1h": 24076.5,
+      "ema50_1h": 24031.0,
+      "last_completed_1d_bar": {
+        "timeframe": "1D",
+        "open_time_ist": "2026-11-05T09:15:00+05:30",
+        "close_time_ist": "2026-11-05T15:30:00+05:30",
+        "open": 24100.0,
+        "high": 24240.0,
+        "low": 24020.0,
+        "close": 24190.0,
+        "volume": 290000.0,
+        "is_final_15m_bar": false
+      },
+      "last_completed_1h_bar": {
+        "timeframe": "1H",
+        "open_time_ist": "2026-11-06T09:15:00+05:30",
+        "close_time_ist": "2026-11-06T10:15:00+05:30",
+        "open": 24160.0,
+        "high": 24215.0,
+        "low": 24095.0,
+        "close": 24200.0,
+        "volume": 62000.0,
+        "is_final_15m_bar": false
+      },
+      "final_15m_bar_completed": true,
+      "stripped_forming_bars_count": 1,
+      "verified_level_touches": [
+        {
+          "level_name": "1H_MA20",
+          "level_value": 24076.5,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        },
+        {
+          "level_name": "1H_EMA50",
+          "level_value": 24031.0,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        },
+        {
+          "level_name": "PREV_1D_HIGH",
+          "level_value": 24240.0,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        },
+        {
+          "level_name": "PREV_1D_LOW",
+          "level_value": 24020.0,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        },
+        {
+          "level_name": "PUT_OI_WALL",
+          "level_value": 24000.0,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        },
+        {
+          "level_name": "CALL_OI_WALL",
+          "level_value": 24500.0,
+          "bar_timeframe": "1H",
+          "bar_close_time_ist": "2026-11-06T10:15:00+05:30",
+          "bar_low": 24095.0,
+          "bar_high": 24215.0,
+          "bar_close": 24200.0,
+          "touched_geometrically": false,
+          "wick_rejection_direction": "NONE"
+        }
+      ]
+    },
+    "volatility_state": {
+      "india_vix": {
+        "value": 14.25,
+        "as_of_ist": "2026-11-06T10:14:35+05:30",
+        "fetched_at_ist": "2026-11-06T10:15:00+05:30",
+        "source_id": "nse_india_vix_unverified",
+        "max_staleness_seconds": 180,
+        "is_stale": false,
+        "verification_tag": "UNVERIFIED"
+      },
+      "atm_iv_by_expiry": {
+        "2026-11-12": 0.144909
+      },
+      "constant_maturity_30d_iv": 0.144909,
+      "iv_source_label": "LIVE_MID_INFERRED",
+      "ivp_30d": 86.67,
+      "ivp_90d": 82.22,
+      "ivp_252d": "UNKNOWN",
+      "iv_history_sessions_count": 95,
+      "iv_history_gaps_flagged": [],
+      "realized_vol_20d": 0.0507,
+      "iv_rv_spread": 0.0942,
+      "skew_25d_put_minus_call": 0.002684,
+      "wing_curvature": 0.000165,
+      "chain_qa_passed": true,
+      "chain_qa_notes": [
+        "Put-call parity QA passed (implied F=24227.85, max dev=0.01 pts).",
+        "ATM anchor QA passed (ATM=24250.0, Call IV=14.49%, Put IV=14.49%).",
+        "Monotonicity, vertical-spread, and butterfly no-arbitrage checks passed."
+      ]
+    },
+    "derivatives_positioning": {
+      "target_expiry": "2026-11-12",
+      "pcr_oi": 1.0456,
+      "pcr_volume": 1.0456,
+      "call_oi_wall_strike": 24500.0,
+      "call_oi_wall_contracts": 185000,
+      "put_oi_wall_strike": 24000.0,
+      "put_oi_wall_contracts": 210000,
+      "max_pain_strike": 24200.0
+    },
+    "event_calendar": {
+      "events_within_dte": [
+        {
+          "event_date": "2026-11-12",
+          "event_name": "India CPI Inflation Release",
+          "category": "MACRO",
+          "impact": "MEDIUM"
+        },
+        {
+          "event_date": "2026-11-23",
+          "event_name": "Holiday-Shifted Monthly NIFTY Expiry (Ahead of 24 Nov Guru Nanak Jayanti)",
+          "category": "EXPIRY_SHIFT",
+          "impact": "HIGH"
+        }
+      ],
+      "calendar_file_age_days": 5.05,
+      "is_calendar_stale_warning": false,
+      "source_verification_tag": "UNVERIFIED"
+    },
+    "triggered_detectors": [
+      {
+        "detector_id": "NOVEL_HIGH_IV_BULLISH_PUT_WALL",
+        "detector_name": "Elevated IVP + Repaired Uptrend Above Put OI Wall",
+        "track": "NOVEL_QUANT",
+        "confirmation_status": "CONFIRMED_QUANT_REGIME",
+        "direction": "BULLISH",
+        "invalidation_level": 24000.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+        "summary": "90d IVP is 82.22 with 1D trend UPTREND and Put OI wall at 24000.0 (210000 contracts). Compares bullish credit spreads, debit spreads, and butterflies side by side.",
+        "evidence_fields_cited": [
+          "market_evidence.volatility_state.ivp_90d",
+          "market_evidence.price_structure.trend_1d_state",
+          "market_evidence.derivatives_positioning.put_oi_wall_strike"
+        ]
+      },
+      {
+        "detector_id": "NOVEL_OI_BRACKETED_NEUTRAL_RANGE",
+        "detector_name": "High-IV OI-Wall Bracketed Neutral Regime",
+        "track": "NOVEL_QUANT",
+        "confirmation_status": "CONFIRMED_QUANT_REGIME",
+        "direction": "NEUTRAL",
+        "invalidation_level": 24500.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close outside [24000.0, 24500.0] OI walls invalidates neutral range.",
+        "summary": "Spot (24200.0) is bracketed between Put OI wall (24000.0) and Call OI wall (24500.0) with 90d IVP=82.22.",
+        "evidence_fields_cited": [
+          "market_evidence.derivatives_positioning.put_oi_wall_strike",
+          "market_evidence.derivatives_positioning.call_oi_wall_strike",
+          "market_evidence.volatility_state.ivp_90d"
+        ]
+      }
+    ]
+  },
+  "candidate_structures": [
+    {
+      "structure_id": "BPS_2026-11-12_24000_23800",
+      "structure_type": "BULL_PUT_SPREAD",
+      "direction": "BULLISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 200.0,
+      "legs": [
+        {
+          "strike": 24000.0,
+          "option_type": "PE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 90.62,
+          "ask": 92.08,
+          "mid": 91.35,
+          "iv": 0.145972,
+          "iv_bid": 0.145314,
+          "iv_ask": 0.14663,
+          "delta": -0.3063,
+          "gamma": 0.00076,
+          "theta_daily": -12.9995,
+          "vega_per_vol_pt": 11.0906,
+          "oi": 210000,
+          "volume": 70000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 83.77
+        },
+        {
+          "strike": 23800.0,
+          "option_type": "PE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 43.4,
+          "ask": 44.1,
+          "mid": 43.75,
+          "iv": 0.146879,
+          "iv_bid": 0.146447,
+          "iv_ask": 0.14731,
+          "delta": -0.1737,
+          "gamma": 0.000552,
+          "theta_daily": -9.5688,
+          "vega_per_vol_pt": 8.1095,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.3
+        }
+      ],
+      "is_net_credit": true,
+      "executable_net_points_per_unit": 45.52,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 10.08,
+        "exchange_txn_charges_rs": 7.09,
+        "sebi_Charges_rs": 0.02,
+        "stamp_duty_rs": 0.3,
+        "gst_rs": 15.68,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 113.17
+      },
+      "contractual_max_loss_rs": 11586.0,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 31551.0,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 72.19,
+      "indicative_stop_index_level": 23998.89,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 3414.0,
+      "breakevens_gross": [
+        23954.48
+      ],
+      "breakevens_net": [
+        23955.99
+      ],
+      "pop_lognormal_expiry": 72.57,
+      "pop_empirical_expiry": 92.39,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.1326,
+      "net_gamma": -0.000208,
+      "net_theta_daily_rs": 257.3,
+      "net_vega_rs": -223.58,
+      "short_leg_max_abs_delta": 0.3063,
+      "structure_liquidity_score": 81.3,
+      "overnight_gap_stress_3pct_loss_rs": 11586.0,
+      "invalidation_level": 24000.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~72.2 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1878). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 11586.00."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "FAIL",
+          "evidence": "contractual_max_loss_rs=Rs 11586.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.306 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=81.3), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "FAIL",
+      "matches_part_b_style": true
+    },
+    {
+      "structure_id": "BPS_2026-11-12_24000_23850",
+      "structure_type": "BULL_PUT_SPREAD",
+      "direction": "BULLISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 150.0,
+      "legs": [
+        {
+          "strike": 24000.0,
+          "option_type": "PE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 90.62,
+          "ask": 92.08,
+          "mid": 91.35,
+          "iv": 0.145972,
+          "iv_bid": 0.145314,
+          "iv_ask": 0.14663,
+          "delta": -0.3063,
+          "gamma": 0.00076,
+          "theta_daily": -12.9995,
+          "vega_per_vol_pt": 11.0906,
+          "oi": 210000,
+          "volume": 70000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 83.77
+        },
+        {
+          "strike": 23850.0,
+          "option_type": "PE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 52.78,
+          "ask": 53.64,
+          "mid": 53.21,
+          "iv": 0.146643,
+          "iv_bid": 0.146161,
+          "iv_ask": 0.147124,
+          "delta": -0.2028,
+          "gamma": 0.000608,
+          "theta_daily": -10.5119,
+          "vega_per_vol_pt": 8.924,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.17
+        }
+      ],
+      "is_net_credit": true,
+      "executable_net_points_per_unit": 35.98,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 10.79,
+        "exchange_txn_charges_rs": 7.59,
+        "sebi_Charges_rs": 0.02,
+        "stamp_duty_rs": 0.33,
+        "gst_rs": 15.77,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 114.49
+      },
+      "contractual_max_loss_rs": 8551.5,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 28516.5,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 62.65,
+      "indicative_stop_index_level": 23942.35,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 2698.5,
+      "breakevens_gross": [
+        23964.02
+      ],
+      "breakevens_net": [
+        23965.55
+      ],
+      "pop_lognormal_expiry": 71.22,
+      "pop_empirical_expiry": 88.04,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.1035,
+      "net_gamma": -0.000152,
+      "net_theta_daily_rs": 186.57,
+      "net_vega_rs": -162.5,
+      "short_leg_max_abs_delta": 0.3063,
+      "structure_liquidity_score": 81.17,
+      "overnight_gap_stress_3pct_loss_rs": 8551.5,
+      "invalidation_level": 24000.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~62.6 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1484). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 8551.50."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 8551.50 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.306 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=81.2), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": true
+    },
+    {
+      "structure_id": "BCS_2026-11-12_24300_24500",
+      "structure_type": "BULL_CALL_SPREAD",
+      "direction": "BULLISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 200.0,
+      "legs": [
+        {
+          "strike": 24300.0,
+          "option_type": "CE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 147.66,
+          "ask": 150.04,
+          "mid": 148.85,
+          "iv": 0.144707,
+          "iv_bid": 0.143752,
+          "iv_ask": 0.145661,
+          "delta": 0.4407,
+          "gamma": 0.000861,
+          "theta_daily": -14.4746,
+          "vega_per_vol_pt": 12.4645,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 80.95
+        },
+        {
+          "strike": 24500.0,
+          "option_type": "CE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 77.17,
+          "ask": 78.41,
+          "mid": 77.79,
+          "iv": 0.143924,
+          "iv_bid": 0.14334,
+          "iv_ask": 0.144507,
+          "delta": 0.2789,
+          "gamma": 0.000738,
+          "theta_daily": -12.2732,
+          "vega_per_vol_pt": 10.6185,
+          "oi": 185000,
+          "volume": 61666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 83.35
+        }
+      ],
+      "is_net_credit": false,
+      "executable_net_points_per_unit": 73.87,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 16.95,
+        "exchange_txn_charges_rs": 11.92,
+        "sebi_Charges_rs": 0.03,
+        "stamp_duty_rs": 0.51,
+        "gst_rs": 16.55,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 125.97
+      },
+      "contractual_max_loss_rs": 5540.25,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 25505.25,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 47.2,
+      "indicative_stop_index_level": 24035.19,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 9459.75,
+      "breakevens_gross": [
+        24373.87
+      ],
+      "breakevens_net": [
+        24375.55
+      ],
+      "pop_lognormal_expiry": 37.45,
+      "pop_empirical_expiry": 36.96,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.1618,
+      "net_gamma": 0.000123,
+      "net_theta_daily_rs": -165.11,
+      "net_vega_rs": 138.45,
+      "short_leg_max_abs_delta": 0.2789,
+      "structure_liquidity_score": 80.95,
+      "overnight_gap_stress_3pct_loss_rs": 5540.25,
+      "invalidation_level": 24000.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~47.2 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 5203). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 5540.25."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 5540.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.279 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=81.0), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": false
+    },
+    {
+      "structure_id": "BULL_BFLY_2026-11-12_24200_24350_24500",
+      "structure_type": "BULLISH_BUTTERFLY",
+      "direction": "BULLISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 300.0,
+      "legs": [
+        {
+          "strike": 24200.0,
+          "option_type": "CE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 195.51,
+          "ask": 198.51,
+          "mid": 197.01,
+          "iv": 0.145116,
+          "iv_bid": 0.143922,
+          "iv_ask": 0.146309,
+          "delta": 0.5274,
+          "gamma": 0.000866,
+          "theta_daily": -14.6306,
+          "vega_per_vol_pt": 12.5707,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.56
+        },
+        {
+          "strike": 24350.0,
+          "option_type": "CE",
+          "side": "SHORT",
+          "ratio": 2,
+          "bid": 126.98,
+          "ask": 129.02,
+          "mid": 128.0,
+          "iv": 0.144501,
+          "iv_bid": 0.143665,
+          "iv_ask": 0.145338,
+          "delta": 0.3981,
+          "gamma": 0.000844,
+          "theta_daily": -14.141,
+          "vega_per_vol_pt": 12.1918,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 80.99
+        },
+        {
+          "strike": 24500.0,
+          "option_type": "CE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 77.17,
+          "ask": 78.41,
+          "mid": 77.79,
+          "iv": 0.143924,
+          "iv_bid": 0.14334,
+          "iv_ask": 0.144507,
+          "delta": 0.2789,
+          "gamma": 0.000738,
+          "theta_daily": -12.2732,
+          "vega_per_vol_pt": 10.6185,
+          "oi": 185000,
+          "volume": 61666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 83.35
+        }
+      ],
+      "is_net_credit": false,
+      "executable_net_points_per_unit": 24.96,
+      "slippage_buffer_points_per_unit": 2.0,
+      "statutory_charges": {
+        "stt_rs": 39.66,
+        "exchange_txn_charges_rs": 27.89,
+        "sebi_Charges_rs": 0.08,
+        "stamp_duty_rs": 1.2,
+        "gst_rs": 26.64,
+        "brokerage_rs": 120.0,
+        "total_charges_rs": 215.46
+      },
+      "contractual_max_loss_rs": 1872.0,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 21837.0,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 1872.0,
+      "indicative_stop_spread_value_per_unit": 0.0,
+      "indicative_stop_index_level": 24000.0,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 1872.0,
+      "max_profit_rs": 9378.0,
+      "breakevens_gross": [
+        24224.96,
+        24475.04
+      ],
+      "breakevens_net": [
+        24227.83,
+        24472.17
+      ],
+      "pop_lognormal_expiry": 19.85,
+      "pop_empirical_expiry": 26.09,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.0101,
+      "net_gamma": -8.4e-05,
+      "net_theta_daily_rs": 103.37,
+      "net_vega_rs": -89.58,
+      "short_leg_max_abs_delta": 0.3981,
+      "structure_liquidity_score": 80.99,
+      "overnight_gap_stress_3pct_loss_rs": 1872.0,
+      "invalidation_level": 24000.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 1872 (operative stop computed from actual fill; indicative spread value ~0.0 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 5158). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=3 (long=2, short=1), contractual_max_loss_rs=Rs 1872.00."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 1872.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 1872.00, total_summed_stop=Rs 1872.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 1872.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.398 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 3 legs pass liquidity (min score=81.0), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": false
+    },
+    {
+      "structure_id": "BEAR_CS_2026-11-12_24450_24600",
+      "structure_type": "BEAR_CALL_SPREAD",
+      "direction": "BEARISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 150.0,
+      "legs": [
+        {
+          "strike": 24450.0,
+          "option_type": "CE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 91.81,
+          "ask": 93.29,
+          "mid": 92.55,
+          "iv": 0.144109,
+          "iv_bid": 0.143451,
+          "iv_ask": 0.144766,
+          "delta": 0.3167,
+          "gamma": 0.000781,
+          "theta_daily": -13.0213,
+          "vega_per_vol_pt": 11.2529,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 80.95
+        },
+        {
+          "strike": 24600.0,
+          "option_type": "CE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 53.19,
+          "ask": 54.05,
+          "mid": 53.62,
+          "iv": 0.143545,
+          "iv_bid": 0.143073,
+          "iv_ask": 0.144016,
+          "delta": 0.2104,
+          "gamma": 0.000635,
+          "theta_daily": -10.5157,
+          "vega_per_vol_pt": 9.12,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 80.91
+        }
+      ],
+      "is_net_credit": true,
+      "executable_net_points_per_unit": 36.76,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 10.91,
+        "exchange_txn_charges_rs": 7.67,
+        "sebi_Charges_rs": 0.02,
+        "stamp_duty_rs": 0.33,
+        "gst_rs": 15.78,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 114.72
+      },
+      "contractual_max_loss_rs": 8493.0,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 28458.0,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 63.43,
+      "indicative_stop_index_level": 24450.86,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 2757.0,
+      "breakevens_gross": [
+        24486.76
+      ],
+      "breakevens_net": [
+        24485.23
+      ],
+      "pop_lognormal_expiry": 71.22,
+      "pop_empirical_expiry": 76.09,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": -0.1063,
+      "net_gamma": -0.000146,
+      "net_theta_daily_rs": 187.92,
+      "net_vega_rs": -159.97,
+      "short_leg_max_abs_delta": 0.3167,
+      "structure_liquidity_score": 80.91,
+      "overnight_gap_stress_3pct_loss_rs": 8493.0,
+      "invalidation_level": 24240.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close above prior 1D high invalidates bearish structure.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~63.4 pts). 2. Exit on completed-candle close beyond invalidation level 24240.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1516). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 8493.00."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 8493.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.317 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24240.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close above prior 1D high invalidates bearish structure.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=80.9), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": true
+    },
+    {
+      "structure_id": "BEAR_PS_2026-11-12_24200_24050",
+      "structure_type": "BEAR_PUT_SPREAD",
+      "direction": "BEARISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 150.0,
+      "legs": [
+        {
+          "strike": 24200.0,
+          "option_type": "PE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 167.84,
+          "ask": 170.54,
+          "mid": 169.19,
+          "iv": 0.145116,
+          "iv_bid": 0.144042,
+          "iv_ask": 0.14619,
+          "delta": -0.4715,
+          "gamma": 0.000866,
+          "theta_daily": -14.6357,
+          "vega_per_vol_pt": 12.5707,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.33
+        },
+        {
+          "strike": 24050.0,
+          "option_type": "PE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 106.87,
+          "ask": 108.59,
+          "mid": 107.73,
+          "iv": 0.145755,
+          "iv_bid": 0.145017,
+          "iv_ask": 0.146493,
+          "delta": -0.3454,
+          "gamma": 0.000799,
+          "theta_daily": -13.6302,
+          "vega_per_vol_pt": 11.6478,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.33
+        }
+      ],
+      "is_net_credit": false,
+      "executable_net_points_per_unit": 64.67,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 20.7,
+        "exchange_txn_charges_rs": 14.56,
+        "sebi_Charges_rs": 0.04,
+        "stamp_duty_rs": 0.63,
+        "gst_rs": 17.03,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 132.96
+      },
+      "contractual_max_loss_rs": 4850.25,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 24815.25,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 38.0,
+      "indicative_stop_index_level": 24411.47,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 6399.75,
+      "breakevens_gross": [
+        24135.33
+      ],
+      "breakevens_net": [
+        24133.56
+      ],
+      "pop_lognormal_expiry": 42.07,
+      "pop_empirical_expiry": 38.04,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": -0.1261,
+      "net_gamma": 6.7e-05,
+      "net_theta_daily_rs": -75.41,
+      "net_vega_rs": 69.22,
+      "short_leg_max_abs_delta": 0.3454,
+      "structure_liquidity_score": 81.33,
+      "overnight_gap_stress_3pct_loss_rs": 4850.25,
+      "invalidation_level": 24240.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close above prior 1D high invalidates bearish structure.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~38.0 pts). 2. Exit on completed-candle close beyond invalidation level 24240.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 3520). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 4850.25."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 4850.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.345 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24240.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close above prior 1D high invalidates bearish structure.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=81.3), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": false
+    },
+    {
+      "structure_id": "IC_2026-11-12_23600_23750_24700_24800",
+      "structure_type": "IRON_CONDOR",
+      "direction": "NEUTRAL",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 1200.0,
+      "legs": [
+        {
+          "strike": 23600.0,
+          "option_type": "PE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 18.16,
+          "ask": 18.66,
+          "mid": 18.41,
+          "iv": 0.147819,
+          "iv_bid": 0.14731,
+          "iv_ask": 0.148324,
+          "delta": -0.0852,
+          "gamma": 0.000333,
+          "theta_daily": -5.8525,
+          "vega_per_vol_pt": 4.9272,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 72.37
+        },
+        {
+          "strike": 23750.0,
+          "option_type": "PE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 35.39,
+          "ask": 35.97,
+          "mid": 35.68,
+          "iv": 0.147114,
+          "iv_bid": 0.146715,
+          "iv_ask": 0.147511,
+          "delta": -0.1474,
+          "gamma": 0.000495,
+          "theta_daily": -8.6097,
+          "vega_per_vol_pt": 7.2845,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.09
+        },
+        {
+          "strike": 24700.0,
+          "option_type": "CE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 35.45,
+          "ask": 36.03,
+          "mid": 35.74,
+          "iv": 0.143187,
+          "iv_bid": 0.142798,
+          "iv_ask": 0.143575,
+          "delta": 0.1529,
+          "gamma": 0.000521,
+          "theta_daily": -8.5877,
+          "vega_per_vol_pt": 7.4652,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 80.76
+        },
+        {
+          "strike": 24800.0,
+          "option_type": "CE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 22.75,
+          "ask": 23.25,
+          "mid": 23.0,
+          "iv": 0.142837,
+          "iv_bid": 0.142406,
+          "iv_ask": 0.143265,
+          "delta": 0.1069,
+          "gamma": 0.000408,
+          "theta_daily": -6.6832,
+          "vega_per_vol_pt": 5.8231,
+          "oi": 95000,
+          "volume": 31666,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 76.35
+        }
+      ],
+      "is_net_credit": true,
+      "executable_net_points_per_unit": 26.93,
+      "slippage_buffer_points_per_unit": 2.0,
+      "statutory_charges": {
+        "stt_rs": 8.42,
+        "exchange_txn_charges_rs": 5.93,
+        "sebi_Charges_rs": 0.02,
+        "stamp_duty_rs": 0.25,
+        "gst_rs": 29.87,
+        "brokerage_rs": 160.0,
+        "total_charges_rs": 204.49
+      },
+      "contractual_max_loss_rs": 9230.25,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 32825.25,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 53.6,
+      "indicative_stop_index_level": 24500.0,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 2019.75,
+      "breakevens_gross": [
+        23723.07,
+        24726.93
+      ],
+      "breakevens_net": [
+        23725.8,
+        24724.2
+      ],
+      "pop_lognormal_expiry": 71.99,
+      "pop_empirical_expiry": 100.0,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.0162,
+      "net_gamma": -0.000275,
+      "net_theta_daily_rs": 349.63,
+      "net_vega_rs": -299.96,
+      "short_leg_max_abs_delta": 0.1529,
+      "structure_liquidity_score": 72.37,
+      "overnight_gap_stress_3pct_loss_rs": 9230.25,
+      "invalidation_level": 24500.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close outside [24000.0, 24500.0] OI walls invalidates neutral range.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~53.6 pts). 2. Exit on completed-candle close beyond invalidation level 24500.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1111). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=4 (long=2, short=2), contractual_max_loss_rs=Rs 9230.25."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 9230.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.153 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24500.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close outside [24000.0, 24500.0] OI walls invalidates neutral range.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 4 legs pass liquidity (min score=72.4), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": true
+    }
+  ],
+  "debate_state": null,
+  "final_output": {
+    "verdict": "SUGGESTION",
+    "is_live_ready": true,
+    "research_only_reason": "",
+    "primary_proposal": {
+      "structure_id": "BPS_2026-11-12_24000_23850",
+      "structure_type": "BULL_PUT_SPREAD",
+      "direction": "BULLISH",
+      "expiry_date": "2026-11-12",
+      "dte_trading_sessions": 3,
+      "lot_size": 75,
+      "lots": 1,
+      "width_points": 150.0,
+      "legs": [
+        {
+          "strike": 24000.0,
+          "option_type": "PE",
+          "side": "SHORT",
+          "ratio": 1,
+          "bid": 90.62,
+          "ask": 92.08,
+          "mid": 91.35,
+          "iv": 0.145972,
+          "iv_bid": 0.145314,
+          "iv_ask": 0.14663,
+          "delta": -0.3063,
+          "gamma": 0.00076,
+          "theta_daily": -12.9995,
+          "vega_per_vol_pt": 11.0906,
+          "oi": 210000,
+          "volume": 70000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 83.77
+        },
+        {
+          "strike": 23850.0,
+          "option_type": "PE",
+          "side": "LONG",
+          "ratio": 1,
+          "bid": 52.78,
+          "ask": 53.64,
+          "mid": 53.21,
+          "iv": 0.146643,
+          "iv_bid": 0.146161,
+          "iv_ask": 0.147124,
+          "delta": -0.2028,
+          "gamma": 0.000608,
+          "theta_daily": -10.5119,
+          "vega_per_vol_pt": 8.924,
+          "oi": 105000,
+          "volume": 35000,
+          "top_book_depth_lots": 25,
+          "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+          "is_stale": false,
+          "liquidity_score": 81.17
+        }
+      ],
+      "is_net_credit": true,
+      "executable_net_points_per_unit": 35.98,
+      "slippage_buffer_points_per_unit": 1.0,
+      "statutory_charges": {
+        "stt_rs": 10.79,
+        "exchange_txn_charges_rs": 7.59,
+        "sebi_Charges_rs": 0.02,
+        "stamp_duty_rs": 0.33,
+        "gst_rs": 15.77,
+        "brokerage_rs": 80.0,
+        "total_charges_rs": 114.49
+      },
+      "contractual_max_loss_rs": 8551.5,
+      "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+      "margin_estimate_rs": 28516.5,
+      "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+      "planned_stop_rs": 2000.0,
+      "indicative_stop_spread_value_per_unit": 62.65,
+      "indicative_stop_index_level": 23942.35,
+      "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+      "portfolio_summed_stop_after_trade_rs": 2000.0,
+      "max_profit_rs": 2698.5,
+      "breakevens_gross": [
+        23964.02
+      ],
+      "breakevens_net": [
+        23965.55
+      ],
+      "pop_lognormal_expiry": 71.22,
+      "pop_empirical_expiry": 88.04,
+      "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+      "net_delta": 0.1035,
+      "net_gamma": -0.000152,
+      "net_theta_daily_rs": 186.57,
+      "net_vega_rs": -162.5,
+      "short_leg_max_abs_delta": 0.3063,
+      "structure_liquidity_score": 81.17,
+      "overnight_gap_stress_3pct_loss_rs": 8551.5,
+      "invalidation_level": 24000.0,
+      "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+      "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+      "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~62.6 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1484). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+      "part_a_checks": {
+        "RULE_1_DEFINED_RISK_ONLY": {
+          "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+          "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 8551.50."
+        },
+        "RULE_2_PER_POSITION_STOP_2000_RS": {
+          "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+          "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+        },
+        "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+          "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+          "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+        },
+        "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+          "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+          "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+          "source_date": "6 Nov 2026",
+          "status": "PASS",
+          "evidence": "contractual_max_loss_rs=Rs 8551.50 vs ceiling Rs 10000.00 (computed leg-wise)."
+        },
+        "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+          "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+          "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+          "source_date": "26 Oct 2026",
+          "status": "NOT_APPLICABLE",
+          "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.306 monitored for 1 DTE gate."
+        },
+        "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+          "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+          "rule_name": "Written index invalidation level on completed-close basis before entry",
+          "source_date": "22 Sep 2026",
+          "status": "PASS",
+          "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+        },
+        "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+          "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+          "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+        },
+        "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+          "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+          "rule_name": "Mandatory IVP and per-leg liquidity gates",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "All 2 legs pass liquidity (min score=81.2), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+        },
+        "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+          "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+          "rule_name": "Rules change only between trades, only by trader",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "No automatic rule mutation proposed."
+        },
+        "RULE_10_HUMAN_FINAL_DECISION": {
+          "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+          "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+          "source_date": "Standing Rule",
+          "status": "PASS",
+          "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+        }
+      },
+      "part_a_overall_status": "PASS",
+      "matches_part_b_style": true
+    },
+    "alternative_candidates": [
+      {
+        "structure_id": "BPS_2026-11-12_24000_23800",
+        "structure_type": "BULL_PUT_SPREAD",
+        "direction": "BULLISH",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 200.0,
+        "legs": [
+          {
+            "strike": 24000.0,
+            "option_type": "PE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 90.62,
+            "ask": 92.08,
+            "mid": 91.35,
+            "iv": 0.145972,
+            "iv_bid": 0.145314,
+            "iv_ask": 0.14663,
+            "delta": -0.3063,
+            "gamma": 0.00076,
+            "theta_daily": -12.9995,
+            "vega_per_vol_pt": 11.0906,
+            "oi": 210000,
+            "volume": 70000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 83.77
+          },
+          {
+            "strike": 23800.0,
+            "option_type": "PE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 43.4,
+            "ask": 44.1,
+            "mid": 43.75,
+            "iv": 0.146879,
+            "iv_bid": 0.146447,
+            "iv_ask": 0.14731,
+            "delta": -0.1737,
+            "gamma": 0.000552,
+            "theta_daily": -9.5688,
+            "vega_per_vol_pt": 8.1095,
+            "oi": 105000,
+            "volume": 35000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 81.3
+          }
+        ],
+        "is_net_credit": true,
+        "executable_net_points_per_unit": 45.52,
+        "slippage_buffer_points_per_unit": 1.0,
+        "statutory_charges": {
+          "stt_rs": 10.08,
+          "exchange_txn_charges_rs": 7.09,
+          "sebi_Charges_rs": 0.02,
+          "stamp_duty_rs": 0.3,
+          "gst_rs": 15.68,
+          "brokerage_rs": 80.0,
+          "total_charges_rs": 113.17
+        },
+        "contractual_max_loss_rs": 11586.0,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 31551.0,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 2000.0,
+        "indicative_stop_spread_value_per_unit": 72.19,
+        "indicative_stop_index_level": 23998.89,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 2000.0,
+        "max_profit_rs": 3414.0,
+        "breakevens_gross": [
+          23954.48
+        ],
+        "breakevens_net": [
+          23955.99
+        ],
+        "pop_lognormal_expiry": 72.57,
+        "pop_empirical_expiry": 92.39,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": 0.1326,
+        "net_gamma": -0.000208,
+        "net_theta_daily_rs": 257.3,
+        "net_vega_rs": -223.58,
+        "short_leg_max_abs_delta": 0.3063,
+        "structure_liquidity_score": 81.3,
+        "overnight_gap_stress_3pct_loss_rs": 11586.0,
+        "invalidation_level": 24000.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~72.2 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1878). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 11586.00."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "FAIL",
+            "evidence": "contractual_max_loss_rs=Rs 11586.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.306 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 2 legs pass liquidity (min score=81.3), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "FAIL",
+        "matches_part_b_style": true
+      },
+      {
+        "structure_id": "BCS_2026-11-12_24300_24500",
+        "structure_type": "BULL_CALL_SPREAD",
+        "direction": "BULLISH",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 200.0,
+        "legs": [
+          {
+            "strike": 24300.0,
+            "option_type": "CE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 147.66,
+            "ask": 150.04,
+            "mid": 148.85,
+            "iv": 0.144707,
+            "iv_bid": 0.143752,
+            "iv_ask": 0.145661,
+            "delta": 0.4407,
+            "gamma": 0.000861,
+            "theta_daily": -14.4746,
+            "vega_per_vol_pt": 12.4645,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 80.95
+          },
+          {
+            "strike": 24500.0,
+            "option_type": "CE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 77.17,
+            "ask": 78.41,
+            "mid": 77.79,
+            "iv": 0.143924,
+            "iv_bid": 0.14334,
+            "iv_ask": 0.144507,
+            "delta": 0.2789,
+            "gamma": 0.000738,
+            "theta_daily": -12.2732,
+            "vega_per_vol_pt": 10.6185,
+            "oi": 185000,
+            "volume": 61666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 83.35
+          }
+        ],
+        "is_net_credit": false,
+        "executable_net_points_per_unit": 73.87,
+        "slippage_buffer_points_per_unit": 1.0,
+        "statutory_charges": {
+          "stt_rs": 16.95,
+          "exchange_txn_charges_rs": 11.92,
+          "sebi_Charges_rs": 0.03,
+          "stamp_duty_rs": 0.51,
+          "gst_rs": 16.55,
+          "brokerage_rs": 80.0,
+          "total_charges_rs": 125.97
+        },
+        "contractual_max_loss_rs": 5540.25,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 25505.25,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 2000.0,
+        "indicative_stop_spread_value_per_unit": 47.2,
+        "indicative_stop_index_level": 24035.19,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 2000.0,
+        "max_profit_rs": 9459.75,
+        "breakevens_gross": [
+          24373.87
+        ],
+        "breakevens_net": [
+          24375.55
+        ],
+        "pop_lognormal_expiry": 37.45,
+        "pop_empirical_expiry": 36.96,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": 0.1618,
+        "net_gamma": 0.000123,
+        "net_theta_daily_rs": -165.11,
+        "net_vega_rs": 138.45,
+        "short_leg_max_abs_delta": 0.2789,
+        "structure_liquidity_score": 80.95,
+        "overnight_gap_stress_3pct_loss_rs": 5540.25,
+        "invalidation_level": 24000.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~47.2 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 5203). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 5540.25."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "PASS",
+            "evidence": "contractual_max_loss_rs=Rs 5540.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.279 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 2 legs pass liquidity (min score=81.0), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "PASS",
+        "matches_part_b_style": false
+      },
+      {
+        "structure_id": "BULL_BFLY_2026-11-12_24200_24350_24500",
+        "structure_type": "BULLISH_BUTTERFLY",
+        "direction": "BULLISH",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 300.0,
+        "legs": [
+          {
+            "strike": 24200.0,
+            "option_type": "CE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 195.51,
+            "ask": 198.51,
+            "mid": 197.01,
+            "iv": 0.145116,
+            "iv_bid": 0.143922,
+            "iv_ask": 0.146309,
+            "delta": 0.5274,
+            "gamma": 0.000866,
+            "theta_daily": -14.6306,
+            "vega_per_vol_pt": 12.5707,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 81.56
+          },
+          {
+            "strike": 24350.0,
+            "option_type": "CE",
+            "side": "SHORT",
+            "ratio": 2,
+            "bid": 126.98,
+            "ask": 129.02,
+            "mid": 128.0,
+            "iv": 0.144501,
+            "iv_bid": 0.143665,
+            "iv_ask": 0.145338,
+            "delta": 0.3981,
+            "gamma": 0.000844,
+            "theta_daily": -14.141,
+            "vega_per_vol_pt": 12.1918,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 80.99
+          },
+          {
+            "strike": 24500.0,
+            "option_type": "CE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 77.17,
+            "ask": 78.41,
+            "mid": 77.79,
+            "iv": 0.143924,
+            "iv_bid": 0.14334,
+            "iv_ask": 0.144507,
+            "delta": 0.2789,
+            "gamma": 0.000738,
+            "theta_daily": -12.2732,
+            "vega_per_vol_pt": 10.6185,
+            "oi": 185000,
+            "volume": 61666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 83.35
+          }
+        ],
+        "is_net_credit": false,
+        "executable_net_points_per_unit": 24.96,
+        "slippage_buffer_points_per_unit": 2.0,
+        "statutory_charges": {
+          "stt_rs": 39.66,
+          "exchange_txn_charges_rs": 27.89,
+          "sebi_Charges_rs": 0.08,
+          "stamp_duty_rs": 1.2,
+          "gst_rs": 26.64,
+          "brokerage_rs": 120.0,
+          "total_charges_rs": 215.46
+        },
+        "contractual_max_loss_rs": 1872.0,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 21837.0,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 1872.0,
+        "indicative_stop_spread_value_per_unit": 0.0,
+        "indicative_stop_index_level": 24000.0,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 1872.0,
+        "max_profit_rs": 9378.0,
+        "breakevens_gross": [
+          24224.96,
+          24475.04
+        ],
+        "breakevens_net": [
+          24227.83,
+          24472.17
+        ],
+        "pop_lognormal_expiry": 19.85,
+        "pop_empirical_expiry": 26.09,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": 0.0101,
+        "net_gamma": -8.4e-05,
+        "net_theta_daily_rs": 103.37,
+        "net_vega_rs": -89.58,
+        "short_leg_max_abs_delta": 0.3981,
+        "structure_liquidity_score": 80.99,
+        "overnight_gap_stress_3pct_loss_rs": 1872.0,
+        "invalidation_level": 24000.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close below Put OI Wall (24000.0) invalidates bullish support.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 1872 (operative stop computed from actual fill; indicative spread value ~0.0 pts). 2. Exit on completed-candle close beyond invalidation level 24000.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 5158). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=3 (long=2, short=1), contractual_max_loss_rs=Rs 1872.00."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 1872.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 1872.00, total_summed_stop=Rs 1872.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "PASS",
+            "evidence": "contractual_max_loss_rs=Rs 1872.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.398 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24000.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close below Put OI Wall (24000.0) invalidates bullish support.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 3 legs pass liquidity (min score=81.0), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "PASS",
+        "matches_part_b_style": false
+      },
+      {
+        "structure_id": "BEAR_CS_2026-11-12_24450_24600",
+        "structure_type": "BEAR_CALL_SPREAD",
+        "direction": "BEARISH",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 150.0,
+        "legs": [
+          {
+            "strike": 24450.0,
+            "option_type": "CE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 91.81,
+            "ask": 93.29,
+            "mid": 92.55,
+            "iv": 0.144109,
+            "iv_bid": 0.143451,
+            "iv_ask": 0.144766,
+            "delta": 0.3167,
+            "gamma": 0.000781,
+            "theta_daily": -13.0213,
+            "vega_per_vol_pt": 11.2529,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 80.95
+          },
+          {
+            "strike": 24600.0,
+            "option_type": "CE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 53.19,
+            "ask": 54.05,
+            "mid": 53.62,
+            "iv": 0.143545,
+            "iv_bid": 0.143073,
+            "iv_ask": 0.144016,
+            "delta": 0.2104,
+            "gamma": 0.000635,
+            "theta_daily": -10.5157,
+            "vega_per_vol_pt": 9.12,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 80.91
+          }
+        ],
+        "is_net_credit": true,
+        "executable_net_points_per_unit": 36.76,
+        "slippage_buffer_points_per_unit": 1.0,
+        "statutory_charges": {
+          "stt_rs": 10.91,
+          "exchange_txn_charges_rs": 7.67,
+          "sebi_Charges_rs": 0.02,
+          "stamp_duty_rs": 0.33,
+          "gst_rs": 15.78,
+          "brokerage_rs": 80.0,
+          "total_charges_rs": 114.72
+        },
+        "contractual_max_loss_rs": 8493.0,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 28458.0,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 2000.0,
+        "indicative_stop_spread_value_per_unit": 63.43,
+        "indicative_stop_index_level": 24450.86,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 2000.0,
+        "max_profit_rs": 2757.0,
+        "breakevens_gross": [
+          24486.76
+        ],
+        "breakevens_net": [
+          24485.23
+        ],
+        "pop_lognormal_expiry": 71.22,
+        "pop_empirical_expiry": 76.09,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": -0.1063,
+        "net_gamma": -0.000146,
+        "net_theta_daily_rs": 187.92,
+        "net_vega_rs": -159.97,
+        "short_leg_max_abs_delta": 0.3167,
+        "structure_liquidity_score": 80.91,
+        "overnight_gap_stress_3pct_loss_rs": 8493.0,
+        "invalidation_level": 24240.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close above prior 1D high invalidates bearish structure.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~63.4 pts). 2. Exit on completed-candle close beyond invalidation level 24240.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1516). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 8493.00."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "PASS",
+            "evidence": "contractual_max_loss_rs=Rs 8493.00 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.317 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24240.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close above prior 1D high invalidates bearish structure.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 2 legs pass liquidity (min score=80.9), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "PASS",
+        "matches_part_b_style": true
+      },
+      {
+        "structure_id": "BEAR_PS_2026-11-12_24200_24050",
+        "structure_type": "BEAR_PUT_SPREAD",
+        "direction": "BEARISH",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 150.0,
+        "legs": [
+          {
+            "strike": 24200.0,
+            "option_type": "PE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 167.84,
+            "ask": 170.54,
+            "mid": 169.19,
+            "iv": 0.145116,
+            "iv_bid": 0.144042,
+            "iv_ask": 0.14619,
+            "delta": -0.4715,
+            "gamma": 0.000866,
+            "theta_daily": -14.6357,
+            "vega_per_vol_pt": 12.5707,
+            "oi": 105000,
+            "volume": 35000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 81.33
+          },
+          {
+            "strike": 24050.0,
+            "option_type": "PE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 106.87,
+            "ask": 108.59,
+            "mid": 107.73,
+            "iv": 0.145755,
+            "iv_bid": 0.145017,
+            "iv_ask": 0.146493,
+            "delta": -0.3454,
+            "gamma": 0.000799,
+            "theta_daily": -13.6302,
+            "vega_per_vol_pt": 11.6478,
+            "oi": 105000,
+            "volume": 35000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 81.33
+          }
+        ],
+        "is_net_credit": false,
+        "executable_net_points_per_unit": 64.67,
+        "slippage_buffer_points_per_unit": 1.0,
+        "statutory_charges": {
+          "stt_rs": 20.7,
+          "exchange_txn_charges_rs": 14.56,
+          "sebi_Charges_rs": 0.04,
+          "stamp_duty_rs": 0.63,
+          "gst_rs": 17.03,
+          "brokerage_rs": 80.0,
+          "total_charges_rs": 132.96
+        },
+        "contractual_max_loss_rs": 4850.25,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 24815.25,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 2000.0,
+        "indicative_stop_spread_value_per_unit": 38.0,
+        "indicative_stop_index_level": 24411.47,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 2000.0,
+        "max_profit_rs": 6399.75,
+        "breakevens_gross": [
+          24135.33
+        ],
+        "breakevens_net": [
+          24133.56
+        ],
+        "pop_lognormal_expiry": 42.07,
+        "pop_empirical_expiry": 38.04,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": -0.1261,
+        "net_gamma": 6.7e-05,
+        "net_theta_daily_rs": -75.41,
+        "net_vega_rs": 69.22,
+        "short_leg_max_abs_delta": 0.3454,
+        "structure_liquidity_score": 81.33,
+        "overnight_gap_stress_3pct_loss_rs": 4850.25,
+        "invalidation_level": 24240.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close above prior 1D high invalidates bearish structure.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~38.0 pts). 2. Exit on completed-candle close beyond invalidation level 24240.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 3520). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=2 (long=1, short=1), contractual_max_loss_rs=Rs 4850.25."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "PASS",
+            "evidence": "contractual_max_loss_rs=Rs 4850.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.345 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24240.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close above prior 1D high invalidates bearish structure.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 2 legs pass liquidity (min score=81.3), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "PASS",
+        "matches_part_b_style": false
+      },
+      {
+        "structure_id": "IC_2026-11-12_23600_23750_24700_24800",
+        "structure_type": "IRON_CONDOR",
+        "direction": "NEUTRAL",
+        "expiry_date": "2026-11-12",
+        "dte_trading_sessions": 3,
+        "lot_size": 75,
+        "lots": 1,
+        "width_points": 1200.0,
+        "legs": [
+          {
+            "strike": 23600.0,
+            "option_type": "PE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 18.16,
+            "ask": 18.66,
+            "mid": 18.41,
+            "iv": 0.147819,
+            "iv_bid": 0.14731,
+            "iv_ask": 0.148324,
+            "delta": -0.0852,
+            "gamma": 0.000333,
+            "theta_daily": -5.8525,
+            "vega_per_vol_pt": 4.9272,
+            "oi": 105000,
+            "volume": 35000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 72.37
+          },
+          {
+            "strike": 23750.0,
+            "option_type": "PE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 35.39,
+            "ask": 35.97,
+            "mid": 35.68,
+            "iv": 0.147114,
+            "iv_bid": 0.146715,
+            "iv_ask": 0.147511,
+            "delta": -0.1474,
+            "gamma": 0.000495,
+            "theta_daily": -8.6097,
+            "vega_per_vol_pt": 7.2845,
+            "oi": 105000,
+            "volume": 35000,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 81.09
+          },
+          {
+            "strike": 24700.0,
+            "option_type": "CE",
+            "side": "SHORT",
+            "ratio": 1,
+            "bid": 35.45,
+            "ask": 36.03,
+            "mid": 35.74,
+            "iv": 0.143187,
+            "iv_bid": 0.142798,
+            "iv_ask": 0.143575,
+            "delta": 0.1529,
+            "gamma": 0.000521,
+            "theta_daily": -8.5877,
+            "vega_per_vol_pt": 7.4652,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 80.76
+          },
+          {
+            "strike": 24800.0,
+            "option_type": "CE",
+            "side": "LONG",
+            "ratio": 1,
+            "bid": 22.75,
+            "ask": 23.25,
+            "mid": 23.0,
+            "iv": 0.142837,
+            "iv_bid": 0.142406,
+            "iv_ask": 0.143265,
+            "delta": 0.1069,
+            "gamma": 0.000408,
+            "theta_daily": -6.6832,
+            "vega_per_vol_pt": 5.8231,
+            "oi": 95000,
+            "volume": 31666,
+            "top_book_depth_lots": 25,
+            "quote_timestamp_ist": "2026-11-06T10:14:35+05:30",
+            "is_stale": false,
+            "liquidity_score": 76.35
+          }
+        ],
+        "is_net_credit": true,
+        "executable_net_points_per_unit": 26.93,
+        "slippage_buffer_points_per_unit": 2.0,
+        "statutory_charges": {
+          "stt_rs": 8.42,
+          "exchange_txn_charges_rs": 5.93,
+          "sebi_Charges_rs": 0.02,
+          "stamp_duty_rs": 0.25,
+          "gst_rs": 29.87,
+          "brokerage_rs": 160.0,
+          "total_charges_rs": 204.49
+        },
+        "contractual_max_loss_rs": 9230.25,
+        "contractual_max_loss_method": "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
+        "margin_estimate_rs": 32825.25,
+        "margin_source": "EXCHANGE_FORMULA_ESTIMATE",
+        "planned_stop_rs": 2000.0,
+        "indicative_stop_spread_value_per_unit": 53.6,
+        "indicative_stop_index_level": 24500.0,
+        "indicative_stop_note": "INDICATIVE SUGGESTION-TIME MARK ONLY (model/IV/time-dependent). The operative Rs 2,000 stop is always computed from the actual executed fill (real fill prices, quantity, and charges) at execution time. Gaps and fast tapes can fill worse than the stop; the stop is not a guaranteed loss limit.",
+        "portfolio_summed_stop_after_trade_rs": 2000.0,
+        "max_profit_rs": 2019.75,
+        "breakevens_gross": [
+          23723.07,
+          24726.93
+        ],
+        "breakevens_net": [
+          23725.8,
+          24724.2
+        ],
+        "pop_lognormal_expiry": 71.99,
+        "pop_empirical_expiry": 100.0,
+        "pop_assumptions_label": "MODEL_DEPENDENT_EXPIRY_HORIZON_ONLY: Terminal payoff probability under (1) IV-implied lognormal and (2) empirical EOD return distribution. Does not reflect stop-managed or invalidation-managed early exits.",
+        "net_delta": 0.0162,
+        "net_gamma": -0.000275,
+        "net_theta_daily_rs": 349.63,
+        "net_vega_rs": -299.96,
+        "short_leg_max_abs_delta": 0.1529,
+        "structure_liquidity_score": 72.37,
+        "overnight_gap_stress_3pct_loss_rs": 9230.25,
+        "invalidation_level": 24500.0,
+        "invalidation_candle_basis": "COMPLETED_DAILY_CLOSE",
+        "invalidation_justification": "Completed daily close outside [24000.0, 24500.0] OI walls invalidates neutral range.",
+        "management_plan": "1. Exit immediately if position mark-to-market loss reaches Rs 2000 (operative stop computed from actual fill; indicative spread value ~53.6 pts). 2. Exit on completed-candle close beyond invalidation level 24500.0 (COMPLETED_DAILY_CLOSE). 3. Review at 50-60% of max profit (Rs 1111). 4. Do not carry into 1 DTE session if any short leg has |delta| >= 0.25 (26 Oct 2026 rule).",
+        "part_a_checks": {
+          "RULE_1_DEFINED_RISK_ONLY": {
+            "rule_id": "RULE_1_DEFINED_RISK_ONLY",
+            "rule_name": "Defined risk only (bounded contractual max loss by construction)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "is_defined_risk=True, legs=4 (long=2, short=2), contractual_max_loss_rs=Rs 9230.25."
+          },
+          "RULE_2_PER_POSITION_STOP_2000_RS": {
+            "rule_id": "RULE_2_PER_POSITION_STOP_2000_RS",
+            "rule_name": "Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "planned_stop_rs=Rs 2000.00 <= limit Rs 2000.00."
+          },
+          "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS": {
+            "rule_id": "RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
+            "rule_name": "Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "open_positions_count=0, existing_summed_stops=Rs 0.00, proposed_stop=Rs 2000.00, total_summed_stop=Rs 2000.00 (cap Rs 10000.00)."
+          },
+          "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS": {
+            "rule_id": "RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
+            "rule_name": "Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff)",
+            "source_date": "6 Nov 2026",
+            "status": "PASS",
+            "evidence": "contractual_max_loss_rs=Rs 9230.25 vs ceiling Rs 10000.00 (computed leg-wise)."
+          },
+          "RULE_5_EXPIRY_1DTE_SHORT_DELTA": {
+            "rule_id": "RULE_5_EXPIRY_1DTE_SHORT_DELTA",
+            "rule_name": "1 DTE short-leg |delta| < 0.25 evaluated leg-by-leg",
+            "source_date": "26 Oct 2026",
+            "status": "NOT_APPLICABLE",
+            "evidence": "dte_trading_sessions=3 (> 1 DTE session); short-leg max |delta|=0.153 monitored for 1 DTE gate."
+          },
+          "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY": {
+            "rule_id": "RULE_6_WRITTEN_INVALIDATION_BEFORE_ENTRY",
+            "rule_name": "Written index invalidation level on completed-close basis before entry",
+            "source_date": "22 Sep 2026",
+            "status": "PASS",
+            "evidence": "invalidation_level=24500.0, basis=COMPLETED_DAILY_CLOSE, justification='Completed daily close outside [24000.0, 24500.0] OI walls invalidates neutral range.'."
+          },
+          "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE": {
+            "rule_id": "RULE_7_COMPLETED_CANDLE_AND_TOUCH_HYGIENE",
+            "rule_name": "Signal hygiene: completed candles only & geometrically verified touches",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "last_completed_1h_close=2026-11-06T10:15:00+05:30, stripped_forming_bars=1, verified_touches_checked=6."
+          },
+          "RULE_8_IVP_AND_LIQUIDITY_GATES": {
+            "rule_id": "RULE_8_IVP_AND_LIQUIDITY_GATES",
+            "rule_name": "Mandatory IVP and per-leg liquidity gates",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "All 4 legs pass liquidity (min score=72.4), chain_qa_passed=True, ivp_30d=86.67, ivp_90d=82.22."
+          },
+          "RULE_9_NO_AUTOMATIC_RULE_CHANGES": {
+            "rule_id": "RULE_9_NO_AUTOMATIC_RULE_CHANGES",
+            "rule_name": "Rules change only between trades, only by trader",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "No automatic rule mutation proposed."
+          },
+          "RULE_10_HUMAN_FINAL_DECISION": {
+            "rule_id": "RULE_10_HUMAN_FINAL_DECISION",
+            "rule_name": "Advisory output only; trader approves or rejects; zero execution capability",
+            "source_date": "Standing Rule",
+            "status": "PASS",
+            "evidence": "System is strictly read-only with zero broker write or order-placement methods."
+          }
+        },
+        "part_a_overall_status": "PASS",
+        "matches_part_b_style": true
+      }
+    ],
+    "habitual_style_comparison_note": "Credit spreads (Bull Put Spread / Bear Call Spread / Iron Condor) and debit spreads / butterflies were generated and evaluated on equal footing without style filtering. See Section 6 table for exact cost, max loss, breakeven, PoP, and vega comparison.",
+    "reasoning_summary": "Spot is at 24200.0 (`contract_context.spot.value`) with 1D structure in UPTREND (`market_evidence.price_structure.trend_1d_state`) and completed 1H MA20 at 24076.5 (`market_evidence.price_structure.ma20_1h`). 90-session IVP stands at 82.22 (`market_evidence.volatility_state.ivp_90d`) with Put OI support at 24000.0 and Call OI resistance at 24500.0. Primary structure `BPS_2026-11-12_24000_23850` (BULL_PUT_SPREAD) passes all applicable Part A checks with leg-wise contractual max loss of Rs 8551.50 (within the Rs 10,000 per-trade ceiling), indicative managed stop of Rs 2000.00, and portfolio summed stop of Rs 2000.00 (within the Rs 10,000 summed-stop cap). Thesis is invalidated on a COMPLETED_DAILY_CLOSE beyond 24000.0.",
+    "part_a_summary_status": "PASS",
+    "research_rule_challenge_note": "RESEARCH NOTE (Between-Trade Context): Habitual 200-pt width structure `BPS_2026-11-12_24000_23800` (lot_size=75) has a leg-wise contractual max loss of Rs 11586.00, which exceeds the settled Rs 10,000 per-trade contractual max loss ceiling (6 Nov 2026) unless net credit exceeds 66.7 pts or wing width is tightened to 150 pts.",
+    "confidence_note": "LIVE-READY (IVP verified and all Part A checks PASS).",
+    "staleness_report": [
+      "Spot as-of 2026-11-06T10:14:40+05:30 (stale=False)",
+      "Chain quotes [2026-11-06T10:14:35+05:30 .. 2026-11-06T10:14:35+05:30] (any_stale=False)"
+    ],
+    "llm_citations": [
+      {
+        "claim_text": "NIFTY spot is at 24200.0",
+        "state_field_path": "contract_context.spot.value",
+        "cited_value": 24200.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'contract_context.spot.value' == 24200.0."
+      },
+      {
+        "claim_text": "1D trend state is UPTREND",
+        "state_field_path": "market_evidence.price_structure.trend_1d_state",
+        "cited_value": "UPTREND",
+        "verified_in_state": true,
+        "verification_note": "Verified against 'market_evidence.price_structure.trend_1d_state' == 'UPTREND'."
+      },
+      {
+        "claim_text": "1H MA20 is 24076.5",
+        "state_field_path": "market_evidence.price_structure.ma20_1h",
+        "cited_value": 24076.5,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'market_evidence.price_structure.ma20_1h' == 24076.5."
+      },
+      {
+        "claim_text": "90-session IVP is 82.22",
+        "state_field_path": "market_evidence.volatility_state.ivp_90d",
+        "cited_value": 82.22,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'market_evidence.volatility_state.ivp_90d' == 82.22."
+      },
+      {
+        "claim_text": "Put OI wall is at strike 24000.0",
+        "state_field_path": "market_evidence.derivatives_positioning.put_oi_wall_strike",
+        "cited_value": 24000.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'market_evidence.derivatives_positioning.put_oi_wall_strike' == 24000.0."
+      },
+      {
+        "claim_text": "Call OI wall is at strike 24500.0",
+        "state_field_path": "market_evidence.derivatives_positioning.call_oi_wall_strike",
+        "cited_value": 24500.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'market_evidence.derivatives_positioning.call_oi_wall_strike' == 24500.0."
+      },
+      {
+        "claim_text": "Primary candidate BPS_2026-11-12_24000_23850 has contractual max loss Rs 8551.5",
+        "state_field_path": "candidate_structures[1].contractual_max_loss_rs",
+        "cited_value": 8551.5,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'candidate_structures[1].contractual_max_loss_rs' == 8551.5."
+      },
+      {
+        "claim_text": "Primary candidate planned stop is Rs 2000.0",
+        "state_field_path": "candidate_structures[1].planned_stop_rs",
+        "cited_value": 2000.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'candidate_structures[1].planned_stop_rs' == 2000.0."
+      },
+      {
+        "claim_text": "Portfolio summed stop after trade is Rs 2000.0",
+        "state_field_path": "candidate_structures[1].portfolio_summed_stop_after_trade_rs",
+        "cited_value": 2000.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'candidate_structures[1].portfolio_summed_stop_after_trade_rs' == 2000.0."
+      },
+      {
+        "claim_text": "Written invalidation level is 24000.0",
+        "state_field_path": "candidate_structures[1].invalidation_level",
+        "cited_value": 24000.0,
+        "verified_in_state": true,
+        "verification_note": "Verified against 'candidate_structures[1].invalidation_level' == 24000.0."
+      }
+    ],
+    "verifier_report": {
+      "total_claims_checked": 10,
+      "unverified_claims_count": 0,
+      "unsupported_claim_rate": 0.0,
+      "part_a_reverified": true,
+      "passed_verification": true,
+      "failure_reasons": []
+    }
+  }
+}

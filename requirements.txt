@@ -1,0 +1,3 @@
+# Core runtime uses Python 3.11+ standard library only (zero mandatory external network dependencies for offline determinism)
+# Optional test runner:
+pytest>=8.0.0

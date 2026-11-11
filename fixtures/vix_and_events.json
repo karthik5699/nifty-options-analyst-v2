@@ -1,0 +1,26 @@
+{
+  "india_vix": {
+    "value": 14.25,
+    "as_of_ist": "2026-11-06T10:14:35+05:30",
+    "source_id": "nse_india_vix_unverified",
+    "verification_tag": "UNVERIFIED"
+  },
+  "events_calendar": {
+    "last_updated_ist": "2026-11-01T09:00:00+05:30",
+    "verification_tag": "UNVERIFIED",
+    "events": [
+      {
+        "event_date": "2026-11-12",
+        "event_name": "India CPI Inflation Release",
+        "category": "MACRO",
+        "impact": "MEDIUM"
+      },
+      {
+        "event_date": "2026-11-23",
+        "event_name": "Holiday-Shifted Monthly NIFTY Expiry (Ahead of 24 Nov Guru Nanak Jayanti)",
+        "category": "EXPIRY_SHIFT",
+        "impact": "HIGH"
+      }
+    ]
+  }
+}

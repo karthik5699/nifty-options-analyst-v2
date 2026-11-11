@@ -1,0 +1,574 @@
+{
+  "eod_sessions": [
+    {
+      "trade_date": "2026-06-25",
+      "spot_close": 23209.28,
+      "cm30_atm_iv": 0.125,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-06-26",
+      "spot_close": 23259.29,
+      "cm30_atm_iv": 0.1304,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-06-29",
+      "spot_close": 23343.83,
+      "cm30_atm_iv": 0.1355,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-06-30",
+      "spot_close": 23451.32,
+      "cm30_atm_iv": 0.14,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-01",
+      "spot_close": 23566.47,
+      "cm30_atm_iv": 0.1435,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-02",
+      "spot_close": 23672.56,
+      "cm30_atm_iv": 0.1459,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-03",
+      "spot_close": 23754.12,
+      "cm30_atm_iv": 0.1469,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-06",
+      "spot_close": 23799.47,
+      "cm30_atm_iv": 0.1466,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-07",
+      "spot_close": 23802.74,
+      "cm30_atm_iv": 0.145,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-08",
+      "spot_close": 23764.89,
+      "cm30_atm_iv": 0.1421,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-09",
+      "spot_close": 23693.57,
+      "cm30_atm_iv": 0.1382,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-10",
+      "spot_close": 23601.76,
+      "cm30_atm_iv": 0.1334,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-13",
+      "spot_close": 23505.6,
+      "cm30_atm_iv": 0.1281,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-14",
+      "spot_close": 23421.7,
+      "cm30_atm_iv": 0.1226,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-15",
+      "spot_close": 23364.6,
+      "cm30_atm_iv": 0.1173,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-16",
+      "spot_close": 23344.58,
+      "cm30_atm_iv": 0.1124,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-17",
+      "spot_close": 23366.17,
+      "cm30_atm_iv": 0.1084,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-20",
+      "spot_close": 23427.55,
+      "cm30_atm_iv": 0.1053,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-21",
+      "spot_close": 23520.78,
+      "cm30_atm_iv": 0.1035,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-22",
+      "spot_close": 23632.9,
+      "cm30_atm_iv": 0.103,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-23",
+      "spot_close": 23747.85,
+      "cm30_atm_iv": 0.1039,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-24",
+      "spot_close": 23848.89,
+      "cm30_atm_iv": 0.1061,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-27",
+      "spot_close": 23921.31,
+      "cm30_atm_iv": 0.1095,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-28",
+      "spot_close": 23954.9,
+      "cm30_atm_iv": 0.1138,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-29",
+      "spot_close": 23945.69,
+      "cm30_atm_iv": 0.1189,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-30",
+      "spot_close": 23896.7,
+      "cm30_atm_iv": 0.1243,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-07-31",
+      "spot_close": 23817.37,
+      "cm30_atm_iv": 0.1297,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-03",
+      "spot_close": 23721.95,
+      "cm30_atm_iv": 0.1349,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-04",
+      "spot_close": 23627.1,
+      "cm30_atm_iv": 0.1395,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-05",
+      "spot_close": 23549.19,
+      "cm30_atm_iv": 0.1431,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-06",
+      "spot_close": 23501.8,
+      "cm30_atm_iv": 0.1456,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-07",
+      "spot_close": 23493.69,
+      "cm30_atm_iv": 0.1469,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-10",
+      "spot_close": 23527.59,
+      "cm30_atm_iv": 0.1468,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-11",
+      "spot_close": 23599.8,
+      "cm30_atm_iv": 0.1453,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-12",
+      "spot_close": 23700.7,
+      "cm30_atm_iv": 0.1426,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-13",
+      "spot_close": 23816.11,
+      "cm30_atm_iv": 0.1387,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-14",
+      "spot_close": 23929.4,
+      "cm30_atm_iv": 0.1341,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-17",
+      "spot_close": 24024.04,
+      "cm30_atm_iv": 0.1288,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-18",
+      "spot_close": 24086.31,
+      "cm30_atm_iv": 0.1233,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-19",
+      "spot_close": 24107.63,
+      "cm30_atm_iv": 0.118,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-20",
+      "spot_close": 24086.05,
+      "cm30_atm_iv": 0.113,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-21",
+      "spot_close": 24026.6,
+      "cm30_atm_iv": 0.1088,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-24",
+      "spot_close": 23940.4,
+      "cm30_atm_iv": 0.1056,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-25",
+      "spot_close": 23842.78,
+      "cm30_atm_iv": 0.1037,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-26",
+      "spot_close": 23750.69,
+      "cm30_atm_iv": 0.103,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-27",
+      "spot_close": 23680.03,
+      "cm30_atm_iv": 0.1037,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-28",
+      "spot_close": 23643.22,
+      "cm30_atm_iv": 0.1057,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-08-31",
+      "spot_close": 23647.41,
+      "cm30_atm_iv": 0.109,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-01",
+      "spot_close": 23693.45,
+      "cm30_atm_iv": 0.1132,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-02",
+      "spot_close": 23775.78,
+      "cm30_atm_iv": 0.1182,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-03",
+      "spot_close": 23883.21,
+      "cm30_atm_iv": 0.1235,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-04",
+      "spot_close": 24000.5,
+      "cm30_atm_iv": 0.129,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-07",
+      "spot_close": 24110.66,
+      "cm30_atm_iv": 0.1342,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-08",
+      "spot_close": 24197.62,
+      "cm30_atm_iv": 0.1389,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-09",
+      "spot_close": 24248.87,
+      "cm30_atm_iv": 0.1427,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-10",
+      "spot_close": 24257.61,
+      "cm30_atm_iv": 0.1454,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-11",
+      "spot_close": 24223.94,
+      "cm30_atm_iv": 0.1468,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-14",
+      "spot_close": 24154.86,
+      "cm30_atm_iv": 0.1469,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-15",
+      "spot_close": 24063.04,
+      "cm30_atm_iv": 0.1456,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-16",
+      "spot_close": 23964.66,
+      "cm30_atm_iv": 0.143,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-17",
+      "spot_close": 23876.75,
+      "cm30_atm_iv": 0.1393,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-18",
+      "spot_close": 23814.51,
+      "cm30_atm_iv": 0.1347,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-21",
+      "spot_close": 23789.05,
+      "cm30_atm_iv": 0.1295,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-22",
+      "spot_close": 23805.77,
+      "cm30_atm_iv": 0.1241,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-23",
+      "spot_close": 23863.62,
+      "cm30_atm_iv": 0.1187,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-24",
+      "spot_close": 23955.23,
+      "cm30_atm_iv": 0.1137,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-25",
+      "spot_close": 24067.95,
+      "cm30_atm_iv": 0.1093,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-28",
+      "spot_close": 24185.67,
+      "cm30_atm_iv": 0.106,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-29",
+      "spot_close": 24291.27,
+      "cm30_atm_iv": 0.1038,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-09-30",
+      "spot_close": 24369.36,
+      "cm30_atm_iv": 0.103,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-01",
+      "spot_close": 24408.85,
+      "cm30_atm_iv": 0.1035,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-05",
+      "spot_close": 24404.85,
+      "cm30_atm_iv": 0.1054,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-06",
+      "spot_close": 24359.55,
+      "cm30_atm_iv": 0.1085,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-07",
+      "spot_close": 24281.83,
+      "cm30_atm_iv": 0.1126,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-08",
+      "spot_close": 24185.73,
+      "cm30_atm_iv": 0.1175,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-09",
+      "spot_close": 24088.07,
+      "cm30_atm_iv": 0.1228,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-12",
+      "spot_close": 24005.71,
+      "cm30_atm_iv": 0.1283,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-13",
+      "spot_close": 23952.96,
+      "cm30_atm_iv": 0.1336,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-14",
+      "spot_close": 23939.45,
+      "cm30_atm_iv": 0.1383,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-15",
+      "spot_close": 23968.76,
+      "cm30_atm_iv": 0.1422,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-16",
+      "spot_close": 24037.92,
+      "cm30_atm_iv": 0.1451,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-19",
+      "spot_close": 24137.82,
+      "cm30_atm_iv": 0.1467,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-20",
+      "spot_close": 24254.49,
+      "cm30_atm_iv": 0.1469,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-21",
+      "spot_close": 24371.14,
+      "cm30_atm_iv": 0.1458,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-22",
+      "spot_close": 24470.78,
+      "cm30_atm_iv": 0.1434,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-23",
+      "spot_close": 24538.92,
+      "cm30_atm_iv": 0.1399,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-26",
+      "spot_close": 24566.07,
+      "cm30_atm_iv": 0.1354,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-27",
+      "spot_close": 24549.36,
+      "cm30_atm_iv": 0.1303,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-28",
+      "spot_close": 24493.05,
+      "cm30_atm_iv": 0.1248,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-29",
+      "spot_close": 24407.8,
+      "cm30_atm_iv": 0.1194,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-10-30",
+      "spot_close": 24308.83,
+      "cm30_atm_iv": 0.1143,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-11-02",
+      "spot_close": 24213.36,
+      "cm30_atm_iv": 0.1099,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-11-03",
+      "spot_close": 24137.87,
+      "cm30_atm_iv": 0.1064,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-11-04",
+      "spot_close": 24095.57,
+      "cm30_atm_iv": 0.1041,
+      "source_label": "EOD_CLOSE_INFERRED"
+    },
+    {
+      "trade_date": "2026-11-05",
+      "spot_close": 24094.48,
+      "cm30_atm_iv": 0.103,
+      "source_label": "EOD_CLOSE_INFERRED"
+    }
+  ]
+}

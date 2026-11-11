@@ -1,0 +1,48 @@
+﻿BUILD PROMPT - NIFTY 50 Options Research Analyst
+(Attach the file "Implementation Plan v3" together with this prompt.)
+
+
+You are generating working code, not another plan. The attached Implementation Plan v3 is the complete requirements and architecture specification. Build against it exactly. Where this prompt and the plan disagree, the plan wins.
+
+
+DELIVERABLES
+
+
+1. A portable Python 3.11+ project (full source tree, pyproject.toml or requirements.txt, README with setup and run instructions) implementing Phase 0 and Phase 1 of the plan:
+   - Deterministic pricing / IV / Greeks engine with the full QA suite (put-call parity, ATM-vs-spot anchor, monotonicity and no-arbitrage checks) and unit tests against known reference values.
+   - Contract-master / expiry / trading-calendar parsing with zero hardcoded weekdays or lot sizes.
+   - Completed-candle hygiene and the two-track setup detectors (historical-reference track tagged unconfirmed; novel regime-driven track).
+   - Candidate defined-risk structure generator (vertical credit and debit spreads, condors, butterflies) with contractual max loss computed leg-wise from the piecewise expiry payoff of the actual structure, never from formula shortcuts beyond single verticals.
+   - Part A gatekeeper returning PASS / FAIL / NOT_APPLICABLE / UNKNOWN per rule, with leg-by-leg applicability and the three separate money policies, never merged: Rs 2,000 per-position managed stop; Rs 10,000 portfolio summed-stop cap (every position's planned stop counted in full, no correlation netting); Rs 10,000 per-trade contractual maximum loss ceiling (hard cap, not a target).
+   - NSE EOD archive loader used only to build the ATM IV history required for IVP, never for strategy backtesting.
+   - Read-only Kotak Neo adapter: quote-level timestamp extraction, staleness checks (180 seconds for active strikes), a provisional, unverified serial request-rate config (default 1 request per 2.5 seconds, replaced by the broker's documented limit once verified) where any HTTP 429 stops the run immediately and reports, with no automatic retry and no limit probing, local caching, and the five scheduled run times (10:15, 11:15, 12:15, 13:15, 14:15 IST on market days).
+   - Single-LLM synthesis node reading only a typed, sanitised JSON evidence state, with mandatory citation verification and a deterministic post-LLM verifier that re-checks every cited figure and Part A result before output.
+   - Alert-only output: produce the full report only when the verdict is SUGGESTION; WAIT and INSUFFICIENT DATA are written to the audit log with no routine message.
+   - Immutable audit log of run inputs and outputs only: no outcomes, no P&L, no performance tracking.
+
+
+2. Essential correctness checks (required, per the plan): unit tests for the pricing math; adapter contract tests covering quote timestamps, a holiday-shifted expiry (example: Monday 23 Nov 2026), a lot-size change, and the final 15-minute candle (15:15-15:30 IST); Part A encoding tests on hand-worked pass / fail / not-applicable / unknown examples, including the 1 DTE short-delta rule applied leg by leg to a debit spread and full summing of correlated positions' stops. No backtesting, historical replay, simulated P&L, win rates, or performance metrics anywhere in the project.
+
+
+3. Setup instructions: configuration through environment variables or a chmod-600 file outside the repository; include a .env.example with placeholder values only.
+
+
+HARD CONSTRAINTS
+
+
+- Read-only: no order placement, modification, or any broker write call anywhere in the codebase, not even stubbed.
+- No secrets anywhere: no credentials, tokens, account numbers, phone numbers, or personal identifiers in code, tests, fixtures, or docs. Credentials are injected at runtime via the OS keychain or the local env file.
+- No paid LLM spend is authorized: make the LLM provider pluggable, default to a local model (Ollama or vLLM), and put any hosted API behind an explicit config flag with a per-run token and cost budget check.
+- UNVERIFIED INTERFACES: the exact Kotak Neo SDK method names, response schemas, and rate limits are not verified. Do not invent API calls. Isolate every SDK interaction behind a small adapter interface with a clearly marked fixture-backed mock for offline development, and tag each real-endpoint mapping as UNVERIFIED until confirmed against the actual SDK documentation. Apply the same treatment to India VIX availability and any margin-calculator endpoint.
+- Asia/Kolkata timezone throughout; every timestamp IST-aware.
+- Strategy policy: defined-risk structures only. Credit spreads are the usual style but never a gate; debit spreads and condors are compared on equal footing; a suggestion is never blocked or labelled non-compliant for departing from style, only for failing a binding Part A rule. No suggestion is ever auto-executed; the trader decides.
+
+
+QUALITY BAR
+
+
+- One typed, JSON-serialisable state object shared across components; deterministic functions pure and unit-tested; the LLM sees only sanitised numeric state.
+- The whole project must run end-to-end offline against included fixtures (contract master, chain quotes, candles, EOD files) with zero network access, so everything is testable before any live read.
+
+
+Report anything you cannot implement faithfully from the plan as an explicit open item instead of guessing.
