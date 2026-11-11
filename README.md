@@ -2,6 +2,8 @@
 
 Quantitative read-only research and defined-risk strategy desk for **NIFTY 50 Index Options**, combining a **100% deterministic Black-76 & surface-analytics engine** with **single-pass multi-persona synthesis** inspired by [*TradingAgents: Multi-Agents LLM Financial Trading Framework*](https://arxiv.org/abs/2412.20138) (Xiao et al., 2024).
 
+> **Live Merge & Review Notes (11 Nov 2026)**: See [`docs/v2_live_merge_notes_for_instinct.md`](docs/v2_live_merge_notes_for_instinct.md) for the item-by-item verification of Instinct's live Kotak API review (`P1-1` through `P3`) and the three architectural merge guards (`RawStrikeQuote` two-stage depth funnel, `35s` request-budget caching, and STT-free / single-pass persona preservation) required before running `v2` against live broker endpoints.
+
 > **Scope & Hard Compliance Boundaries**
 > - **Strictly Read-Only**: Zero order placement, modification, cancellation, or broker write calls exist anywhere in the codebase (enforced via AST regression tests).
 > - **100% Deterministic Quantitative Math**: Black-76 pricing, Brent implied-volatility solving, variance-interpolated constant-maturity 30-day IV (`CM30`), analytical Greeks, Wilder `RSI(14)` / `ATR(14)`, piecewise expiry payoff bounds, Black-76 stop triggers, and all 10 Part A gatekeeper rules are computed deterministically in pure Python—never by an LLM.
@@ -44,6 +46,7 @@ nifty_options_analyst/
 ├── .env.example                         # Config template (store real secrets outside repo with chmod 600)
 ├── run_tests.py                         # Zero-dependency test runner (40 suites / checks)
 ├── docs/
+│   ├── v2_live_merge_notes_for_instinct.md # Live review verification & 3 merge architecture guards
 │   ├── implementation_plan_v3.md        # Core compliance & domain specification
 │   ├── build_prompt.txt                 # Original build specification
 │   ├── sample_offline_report.md         # Full 7-section sample report from bundled fixtures
@@ -88,7 +91,7 @@ nifty_options_analyst/
 ## Quick Start
 
 ### 1. Run the Verification Test Suite
-Runs 100% offline using only the Python 3.11+ standard library:
+Runs 100% offline using only the Python 3.10+ standard library:
 ```bash
 python3 run_tests.py
 ```
