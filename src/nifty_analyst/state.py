@@ -108,6 +108,7 @@ class OpenPosition:
     current_executable_spread_value_rs: float
     short_leg_deltas: list[float]
     dte_trading_sessions: int
+    neo_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,8 @@ class PortfolioExposureState:
     summed_planned_stops_rs: float
     remaining_stop_budget_rs: float
     directional_exposure_groups: dict[str, list[str]]  # Grouping for exposure report only; never netted
+    portfolio_state_status: Literal["VERIFIED", "PORTFOLIO_STATE_UNKNOWN"] = "VERIFIED"
+    portfolio_state_error: str = ""
 
 
 @dataclass(frozen=True)

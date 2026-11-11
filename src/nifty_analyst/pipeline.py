@@ -17,7 +17,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Literal, Sequence
 
 from nifty_analyst.adapters.calendar_and_contracts import (
     ContractMasterError,
@@ -38,6 +38,8 @@ from nifty_analyst.adapters.kotak_neo import (
     parse_and_validate_option_chain,
     slice_completed_candles,
 )
+from nifty_analyst.adapters.open_positions import load_open_positions
+from nifty_analyst.adapters.request_safety import PacedReadTransport
 from nifty_analyst.config import AnalystConfig
 from nifty_analyst.engine.detectors import (
     analyze_price_structure,
@@ -84,6 +86,8 @@ from nifty_analyst.synthesis.verifier import verify_llm_synthesis
 def build_portfolio_exposure_state(
     open_positions: Sequence[OpenPosition],
     portfolio_cap_rs: float = 10000.0,
+    portfolio_state_status: Literal["VERIFIED", "PORTFOLIO_STATE_UNKNOWN"] = "VERIFIED",
+    portfolio_state_error: str = "",
 ) -> PortfolioExposureState:
     """Build PortfolioExposureState counting EVERY position's planned stop in full (zero netting)."""
     positions_list = list(open_positions)
@@ -104,6 +108,8 @@ def build_portfolio_exposure_state(
         summed_planned_stops_rs=summed_stops,
         remaining_stop_budget_rs=remaining,
         directional_exposure_groups=groups,
+        portfolio_state_status=portfolio_state_status,
+        portfolio_state_error=portfolio_state_error,
     )
 
 
@@ -297,16 +303,33 @@ def run_analyst_pipeline(
     open_positions: Sequence[OpenPosition] | None = None,
     target_expiry_override: str | None = None,
     force_render_for_inspection: bool = False,
+    suppress_trader_alerts: bool = False,
 ) -> tuple[NiftyOptionsState, AuditDeliveryResult]:
     """Execute the full NIFTY 50 Options Research Analyst pipeline (single-pass, zero multicall)."""
     dec_ist = ensure_ist(decision_dt_ist)
     scrubber = config.build_scrubber()
     run_id = f"run_{dec_ist.strftime('%Y%m%d_%H%M%S')}_{config.config_hash()[:6]}"
 
-    portfolio_state = build_portfolio_exposure_state(
-        open_positions or [],
-        portfolio_cap_rs=config.portfolio_summed_stop_cap_rs,
-    )
+    if open_positions is not None:
+        portfolio_state = build_portfolio_exposure_state(
+            open_positions,
+            portfolio_cap_rs=config.portfolio_summed_stop_cap_rs,
+        )
+    else:
+        pos_load = load_open_positions(
+            config.resolved_open_positions_path(),
+            fail_closed_if_unconfigured=(config.mode == "LIVE_MORNING_SNAPSHOT"),
+        )
+        portfolio_state = build_portfolio_exposure_state(
+            pos_load.positions,
+            portfolio_cap_rs=config.portfolio_summed_stop_cap_rs,
+            portfolio_state_status=pos_load.status,
+            portfolio_state_error=pos_load.error,
+        )
+
+    held_neo_symbols = [
+        ns for pos in portfolio_state.open_positions for ns in pos.neo_symbols
+    ]
 
     try:
         holidays, holiday_descs = load_nse_holiday_calendar(config.resolved_holidays_path())
@@ -318,8 +341,15 @@ def run_analyst_pipeline(
                     enforce_schedule_in_live_mode=False,
                 )
             else:
-                live_limiter = ProvisionalSerialRateLimiter(
-                    min_interval_seconds=config.kotak_min_request_interval_seconds
+                cooldown_path = (
+                    Path(config.cache_dir) / "kotak_429_cooldown.json"
+                    if config.cache_dir
+                    else None
+                )
+                live_limiter = PacedReadTransport(
+                    min_interval_seconds=config.kotak_min_request_interval_seconds,
+                    max_queue_wait_seconds=config.kotak_max_queue_wait_seconds,
+                    cooldown_file_path=cooldown_path,
                 )
                 trading_cal = {
                     "holiday_dates": frozenset(d.isoformat() for d in holidays),
@@ -329,6 +359,11 @@ def run_analyst_pipeline(
                     kotak_api_root=config.kotak_api_root or None,
                     rate_limiter=live_limiter,
                     enforce_schedule_in_live_mode=True,
+                    depth_strikes_each_side=config.kotak_chain_strike_count,
+                    quotes_batch_size=config.kotak_quotes_batch_size,
+                    max_depth_tokens_per_expiry=config.kotak_max_depth_tokens_per_expiry,
+                    extra_neo_symbols=held_neo_symbols,
+                    cache_dir=config.cache_dir or None,
                     trading_calendar=trading_cal,  # type: ignore[arg-type]
                 )
 
@@ -355,6 +390,7 @@ def run_analyst_pipeline(
             config.audit_log_path,
             scrubber=scrubber,
             force_render_for_inspection=force_render_for_inspection,
+            suppress_trader_alerts=suppress_trader_alerts,
         )
         return state, delivery
 
@@ -375,6 +411,7 @@ def run_analyst_pipeline(
             config.audit_log_path,
             scrubber=scrubber,
             force_render_for_inspection=force_render_for_inspection,
+            suppress_trader_alerts=suppress_trader_alerts,
         )
         return state, delivery
 
@@ -391,7 +428,12 @@ def run_analyst_pipeline(
             if exp.dte_trading_sessions >= 2:
                 anchor_expiry_meta = exp
                 break
-        if config.evaluate_all_active_expiries:
+        # In live mode with small verified quotes batch size (<= 5 tokens/call), evaluate only
+        # the anchor expiry so total serial requests stay strictly within the 35s queue cap.
+        live_budget_constrained = (
+            config.mode == "LIVE_MORNING_SNAPSHOT" and config.kotak_quotes_batch_size <= 5
+        )
+        if config.evaluate_all_active_expiries and not live_budget_constrained:
             expiries_to_evaluate = [
                 exp for exp in contract_ctx.active_expiries if exp.dte_trading_sessions >= 1
             ] or [anchor_expiry_meta]
@@ -404,6 +446,8 @@ def run_analyst_pipeline(
     ]
 
     evaluated_chains: list[tuple[ExpiryMetadata, ChainSnapshotEnvelope, ChainQAResult, float, float]] = []
+    all_rejected_books: list[dict[str, Any]] = []
+    live_expiry_lots: dict[str, int] = {}
     spot_val = contract_ctx.spot.value
 
     try:
@@ -428,6 +472,13 @@ def run_analyst_pipeline(
                     raise
                 continue
 
+            if chain_env.rejected_depth_books:
+                all_rejected_books.extend(chain_env.rejected_depth_books)
+            if chain_env.lot_size is not None and chain_env.lot_size > 0:
+                live_expiry_lots[exp_meta.expiry_date] = chain_env.lot_size
+                if chain_env.lot_size != exp_meta.lot_size:
+                    exp_meta = dataclasses.replace(exp_meta, lot_size=chain_env.lot_size)
+
             if chain_env.any_stale:
                 if is_anchor:
                     state = _create_insufficient_data_state(
@@ -446,6 +497,12 @@ def run_analyst_pipeline(
                         config.audit_log_path,
                         scrubber=scrubber,
                         force_render_for_inspection=force_render_for_inspection,
+                        suppress_trader_alerts=suppress_trader_alerts,
+                        extra_audit_metadata=(
+                            {"rejected_depth_books": all_rejected_books}
+                            if all_rejected_books
+                            else None
+                        ),
                     )
                     return state, delivery
                 continue
@@ -472,6 +529,12 @@ def run_analyst_pipeline(
                         config.audit_log_path,
                         scrubber=scrubber,
                         force_render_for_inspection=force_render_for_inspection,
+                        suppress_trader_alerts=suppress_trader_alerts,
+                        extra_audit_metadata=(
+                            {"rejected_depth_books": all_rejected_books}
+                            if all_rejected_books
+                            else None
+                        ),
                     )
                     return state, delivery
                 continue
@@ -493,8 +556,25 @@ def run_analyst_pipeline(
             config.audit_log_path,
             scrubber=scrubber,
             force_render_for_inspection=force_render_for_inspection,
+            suppress_trader_alerts=suppress_trader_alerts,
+            extra_audit_metadata=(
+                {"rejected_depth_books": all_rejected_books} if all_rejected_books else None
+            ),
         )
         return state, delivery
+
+    if live_expiry_lots:
+        updated_active = [
+            dataclasses.replace(e, lot_size=live_expiry_lots[e.expiry_date])
+            if e.expiry_date in live_expiry_lots and live_expiry_lots[e.expiry_date] != e.lot_size
+            else e
+            for e in contract_ctx.active_expiries
+        ]
+        contract_ctx = dataclasses.replace(
+            contract_ctx,
+            active_expiries=updated_active,
+            lot_size_change_detected=len({e.lot_size for e in updated_active}) > 1,
+        )
 
     anchor_meta, anchor_chain_env, anchor_qa, anchor_t_yrs, anchor_atm_iv = evaluated_chains[0]
     atm_iv_by_expiry = {m.expiry_date: iv for (m, _, _, _, iv) in evaluated_chains}
@@ -527,6 +607,13 @@ def run_analyst_pipeline(
         risk_free_rate=config.risk_free_rate_annual,
     )
 
+    qa_notes_combined = list(anchor_qa.notes)
+    if all_rejected_books:
+        qa_notes_combined.append(
+            f"Rejected {len(all_rejected_books)} non-executable depth book(s) to None/UNKNOWN; "
+            "raw payloads logged in audit record."
+        )
+
     vol_evidence = VolatilityEvidence(
         india_vix=vix_datum,
         atm_iv_by_expiry=atm_iv_by_expiry,
@@ -543,7 +630,7 @@ def run_analyst_pipeline(
         skew_25d_put_minus_call=skew_25d,
         wing_curvature=wing_curv,
         chain_qa_passed=anchor_qa.passed,
-        chain_qa_notes=anchor_qa.notes,
+        chain_qa_notes=qa_notes_combined,
         term_structure_slope_near_minus_far=ts_slope,
         term_structure_regime=ts_regime,
     )
@@ -743,8 +830,11 @@ def run_analyst_pipeline(
         if selected_primary is None or c.structure_id != selected_primary.structure_id
     ]
 
+    portfolio_unknown = portfolio_state.portfolio_state_status != "VERIFIED"
+
     is_live_ready = (
         verdict == "SUGGESTION"
+        and not portfolio_unknown
         and not ivp_unknown
         and not any_fetch_time_unverified
         and selected_primary is not None
@@ -752,7 +842,11 @@ def run_analyst_pipeline(
     )
     research_only_reason = ""
     if not is_live_ready:
-        if ivp_unknown:
+        if portfolio_unknown:
+            research_only_reason = (
+                f"PORTFOLIO_STATE_UNKNOWN: {portfolio_state.portfolio_state_error}"
+            )
+        elif ivp_unknown:
             research_only_reason = (
                 "IVP is UNKNOWN; output is labelled research-only per Section 4.2 & 5A.8."
             )
@@ -856,5 +950,9 @@ def run_analyst_pipeline(
         audit_log_path=config.audit_log_path,
         scrubber=scrubber,
         force_render_for_inspection=force_render_for_inspection,
+        suppress_trader_alerts=suppress_trader_alerts,
+        extra_audit_metadata=(
+            {"rejected_depth_books": all_rejected_books} if all_rejected_books else None
+        ),
     )
     return completed_state, delivery

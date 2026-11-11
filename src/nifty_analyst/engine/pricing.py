@@ -305,13 +305,18 @@ def compute_variance_interpolated_cm30_iv(
 
 @dataclass(frozen=True)
 class RawStrikeQuote:
-    """Strike-level call/put quote pair for Chain QA and pricing."""
+    """Strike-level call/put quote pair for Chain QA and pricing.
+
+    Missing, unfetched, LTP-only, empty, locked, or crossed books MUST carry `None`
+    for bid/ask (never `0.0` and never `ltp`) so unpriced strikes cannot leak into
+    marks, breakevens, stops, or Chain QA.
+    """
 
     strike: float
-    call_bid: float
-    call_ask: float
-    put_bid: float
-    put_ask: float
+    call_bid: float | None
+    call_ask: float | None
+    put_bid: float | None
+    put_ask: float | None
     call_oi: int = 0
     put_oi: int = 0
     call_volume: int = 0
@@ -326,21 +331,49 @@ class RawStrikeQuote:
     put_ask_depth_lots: int | None = None
 
     @property
-    def call_mid(self) -> float:
+    def has_executable_call(self) -> bool:
+        return (
+            self.call_bid is not None
+            and self.call_ask is not None
+            and 0.0 < self.call_bid < self.call_ask
+        )
+
+    @property
+    def has_executable_put(self) -> bool:
+        return (
+            self.put_bid is not None
+            and self.put_ask is not None
+            and 0.0 < self.put_bid < self.put_ask
+        )
+
+    @property
+    def has_both_executable(self) -> bool:
+        return self.has_executable_call and self.has_executable_put
+
+    @property
+    def call_mid(self) -> float | None:
+        if not self.has_executable_call or self.call_bid is None or self.call_ask is None:
+            return None
         return 0.5 * (self.call_bid + self.call_ask)
 
     @property
-    def put_mid(self) -> float:
+    def put_mid(self) -> float | None:
+        if not self.has_executable_put or self.put_bid is None or self.put_ask is None:
+            return None
         return 0.5 * (self.put_bid + self.put_ask)
 
     def depth_lots_for(self, option_type: OptionType, side: Literal["LONG", "SHORT"]) -> int:
         """Return executable top-of-book depth for the active order side (LONG lifts ask; SHORT hits bid)."""
         if option_type == "CE":
+            if not self.has_executable_call:
+                return 0
             if side == "LONG" and self.call_ask_depth_lots is not None:
                 return self.call_ask_depth_lots
             if side == "SHORT" and self.call_bid_depth_lots is not None:
                 return self.call_bid_depth_lots
             return self.call_depth_lots
+        if not self.has_executable_put:
+            return 0
         if side == "LONG" and self.put_ask_depth_lots is not None:
             return self.put_ask_depth_lots
         if side == "SHORT" and self.put_bid_depth_lots is not None:
@@ -367,14 +400,15 @@ def infer_forward_from_near_atm_parity(
     risk_free_rate: float,
     num_near_atm: int = 5,
 ) -> tuple[float, list[float]]:
-    """Compute synthetic forward F = K + exp(rT)*(C_mid - P_mid) across 5 strikes nearest ATM."""
-    if not quotes:
-        raise ValueError("Empty option chain quotes.")
-    sorted_by_dist = sorted(quotes, key=lambda q: abs(q.strike - spot))
+    """Compute synthetic forward F = K + exp(rT)*(C_mid - P_mid) across near-ATM strikes with executable books."""
+    both_priced = [q for q in quotes if q.has_both_executable]
+    if not both_priced:
+        raise ValueError("Empty or unpriced option chain quotes (no strike has executable CE & PE books).")
+    sorted_by_dist = sorted(both_priced, key=lambda q: abs(q.strike - spot))
     near_atm = sorted_by_dist[: min(num_near_atm, len(sorted_by_dist))]
     inv_df = math.exp(risk_free_rate * max(time_to_expiry_years, 1e-8))
     implied_forwards = [
-        q.strike + inv_df * (q.call_mid - q.put_mid)
+        q.strike + inv_df * (float(q.call_mid) - float(q.put_mid))  # type: ignore[arg-type]
         for q in near_atm
     ]
     median_f = float(statistics.median(implied_forwards))
@@ -392,11 +426,13 @@ def run_chain_qa_suite(
 ) -> ChainQAResult:
     """Execute mandatory Section 4.1 QA suite before any option chain is used.
 
-    Checks:
-    1. Put-call parity consistency across the 5 strikes nearest ATM (aborts with CHAIN_PARITY_FAILURE).
-    2. ATM-vs-spot anchor check (|delta| ~ 0.50 strike within 1 strike interval of synthetic forward;
+    Supports both full-chain fixtures and targeted live depth funnels (where non-shortlisted
+    far strikes carry `None` bid/ask):
+    1. Verifies the 3 strikes nearest `spot` have executable CE & PE books (`CHAIN_ATM_DEPTH_MISSING`).
+    2. Put-call parity consistency across up to 5 near-ATM priced strikes (`CHAIN_PARITY_FAILURE`).
+    3. ATM-vs-spot anchor check (|delta| ~ 0.50 strike within 1 strike interval of synthetic forward;
        ATM call IV and put IV agree within 0.5 vol points).
-    3. Monotonicity and vertical-spread / butterfly no-arbitrage checks.
+    4. Monotonicity and vertical-spread / butterfly no-arbitrage checks across all priced strikes.
     """
     notes: list[str] = []
     if len(quotes) < 3:
@@ -415,24 +451,44 @@ def run_chain_qa_suite(
     strike_intervals = [
         ordered[i + 1].strike - ordered[i].strike
         for i in range(len(ordered) - 1)
+        if ordered[i + 1].strike > ordered[i].strike
     ]
     strike_step = min(strike_intervals) if strike_intervals else 50.0
 
-    # 1. Put-call parity check across 5 strikes nearest ATM
+    nearest_three = sorted(ordered, key=lambda q: abs(q.strike - spot))[:3]
+    missing_atm = [q.strike for q in nearest_three if not q.has_both_executable]
+    both_priced = [q for q in ordered if q.has_both_executable]
+    if missing_atm or len(both_priced) < 3:
+        notes.append(
+            f"CHAIN_ATM_DEPTH_MISSING: near-ATM strikes {missing_atm} lack executable two-sided "
+            f"depth books (priced_pairs={len(both_priced)})."
+        )
+        return ChainQAResult(
+            passed=False,
+            failure_code="CHAIN_ATM_DEPTH_MISSING",
+            implied_forward=spot,
+            atm_strike=nearest_three[0].strike if nearest_three else spot,
+            atm_call_iv=0.0,
+            atm_put_iv=0.0,
+            parity_max_deviation_points=0.0,
+            notes=notes,
+        )
+
+    # 1. Put-call parity check across up to 5 near-ATM strikes with executable books
     implied_f, near_forwards = infer_forward_from_near_atm_parity(
-        spot, ordered, time_to_expiry_years, risk_free_rate, num_near_atm=5
+        spot, both_priced, time_to_expiry_years, risk_free_rate, num_near_atm=5
     )
     max_dev = max(abs(f - implied_f) for f in near_forwards)
     if max_dev > parity_tolerance_points:
         notes.append(
-            f"CHAIN_PARITY_FAILURE: max implied-forward deviation across 5 near-ATM strikes "
+            f"CHAIN_PARITY_FAILURE: max implied-forward deviation across {len(near_forwards)} near-ATM strikes "
             f"is {max_dev:.2f} pts > {parity_tolerance_points:.2f} pts."
         )
         return ChainQAResult(
             passed=False,
             failure_code="CHAIN_PARITY_FAILURE",
             implied_forward=implied_f,
-            atm_strike=ordered[0].strike,
+            atm_strike=both_priced[0].strike,
             atm_call_iv=0.0,
             atm_put_iv=0.0,
             parity_max_deviation_points=max_dev,
@@ -441,7 +497,8 @@ def run_chain_qa_suite(
     notes.append(f"Put-call parity QA passed (implied F={implied_f:.2f}, max dev={max_dev:.2f} pts).")
 
     # 2. ATM-vs-spot anchor check
-    atm_quote = min(ordered, key=lambda q: abs(q.strike - implied_f))
+    atm_quote = min(both_priced, key=lambda q: abs(q.strike - implied_f))
+    assert atm_quote.call_mid is not None and atm_quote.put_mid is not None
     atm_call_iv = solve_iv_black76(
         atm_quote.call_mid, implied_f, atm_quote.strike, time_to_expiry_years, risk_free_rate, "CE"
     )
@@ -449,10 +506,14 @@ def run_chain_qa_suite(
         atm_quote.put_mid, implied_f, atm_quote.strike, time_to_expiry_years, risk_free_rate, "PE"
     )
 
-    # Find strike whose call |delta| is closest to 0.50
+    call_priced = [q for q in ordered if q.has_executable_call]
+    put_priced = [q for q in ordered if q.has_executable_put]
+
+    # Find priced strike whose call |delta| is closest to 0.50
     best_delta_50_strike = atm_quote.strike
     best_delta_diff = 999.0
-    for q in ordered:
+    for q in call_priced:
+        assert q.call_mid is not None
         c_iv = solve_iv_black76(
             q.call_mid, implied_f, q.strike, time_to_expiry_years, risk_free_rate, "CE"
         )
@@ -498,14 +559,13 @@ def run_chain_qa_suite(
         f"ATM anchor QA passed (ATM={atm_quote.strike}, Call IV={atm_call_iv * 100:.2f}%, Put IV={atm_put_iv * 100:.2f}%)."
     )
 
-    # 3. Monotonicity and vertical-spread / butterfly no-arbitrage checks
+    # 3. Monotonicity and vertical-spread / butterfly no-arbitrage checks across priced strikes
     df = math.exp(-risk_free_rate * max(time_to_expiry_years, 1e-8))
-    for i in range(len(ordered) - 1):
-        q1, q2 = ordered[i], ordered[i + 1]
+    for i in range(len(call_priced) - 1):
+        q1, q2 = call_priced[i], call_priced[i + 1]
+        assert q1.call_mid is not None and q2.call_mid is not None
         dk = q2.strike - q1.strike
         max_vertical = df * dk
-
-        # Call monotonicity: C(K1) >= C(K2)
         if q1.call_mid + arbitrage_epsilon < q2.call_mid:
             notes.append(
                 f"MONOTONICITY_FAILURE: Call mid increases from {q1.strike} ({q1.call_mid}) to {q2.strike} ({q2.call_mid})."
@@ -520,15 +580,13 @@ def run_chain_qa_suite(
                 parity_max_deviation_points=max_dev,
                 notes=notes,
             )
-
-        # Put monotonicity: P(K1) <= P(K2)
-        if q1.put_mid > q2.put_mid + arbitrage_epsilon:
+        if (q1.call_mid - q2.call_mid) > max_vertical + arbitrage_epsilon:
             notes.append(
-                f"MONOTONICITY_FAILURE: Put mid decreases from {q1.strike} ({q1.put_mid}) to {q2.strike} ({q2.put_mid})."
+                f"VERTICAL_ARBITRAGE_FAILURE: Call vertical {q1.strike}/{q2.strike} exceeds discounted width."
             )
             return ChainQAResult(
                 passed=False,
-                failure_code="MONOTONICITY_FAILURE",
+                failure_code="VERTICAL_ARBITRAGE_FAILURE",
                 implied_forward=implied_f,
                 atm_strike=atm_quote.strike,
                 atm_call_iv=atm_call_iv,
@@ -537,14 +595,18 @@ def run_chain_qa_suite(
                 notes=notes,
             )
 
-        # Vertical spread upper bound
-        if (q1.call_mid - q2.call_mid) > max_vertical + arbitrage_epsilon:
+    for i in range(len(put_priced) - 1):
+        q1, q2 = put_priced[i], put_priced[i + 1]
+        assert q1.put_mid is not None and q2.put_mid is not None
+        dk = q2.strike - q1.strike
+        max_vertical = df * dk
+        if q1.put_mid > q2.put_mid + arbitrage_epsilon:
             notes.append(
-                f"VERTICAL_ARBITRAGE_FAILURE: Call vertical {q1.strike}/{q2.strike} exceeds discounted width."
+                f"MONOTONICITY_FAILURE: Put mid decreases from {q1.strike} ({q1.put_mid}) to {q2.strike} ({q2.put_mid})."
             )
             return ChainQAResult(
                 passed=False,
-                failure_code="VERTICAL_ARBITRAGE_FAILURE",
+                failure_code="MONOTONICITY_FAILURE",
                 implied_forward=implied_f,
                 atm_strike=atm_quote.strike,
                 atm_call_iv=atm_call_iv,
@@ -567,15 +629,35 @@ def run_chain_qa_suite(
                 notes=notes,
             )
 
-    # Butterfly convexity check on equidistant consecutive triples
-    for i in range(len(ordered) - 2):
-        q1, q2, q3 = ordered[i], ordered[i + 1], ordered[i + 2]
+    # Butterfly convexity check on equidistant consecutive priced triples
+    for i in range(len(call_priced) - 2):
+        q1, q2, q3 = call_priced[i], call_priced[i + 1], call_priced[i + 2]
+        assert q1.call_mid is not None and q2.call_mid is not None and q3.call_mid is not None
         if abs((q2.strike - q1.strike) - (q3.strike - q2.strike)) < 1e-6:
             call_bfly = q1.call_mid - 2.0 * q2.call_mid + q3.call_mid
-            put_bfly = q1.put_mid - 2.0 * q2.put_mid + q3.put_mid
-            if call_bfly < -arbitrage_epsilon or put_bfly < -arbitrage_epsilon:
+            if call_bfly < -arbitrage_epsilon:
                 notes.append(
-                    f"BUTTERFLY_ARBITRAGE_FAILURE: Non-convex butterfly at {q1.strike}/{q2.strike}/{q3.strike}."
+                    f"BUTTERFLY_ARBITRAGE_FAILURE: Non-convex call butterfly at {q1.strike}/{q2.strike}/{q3.strike}."
+                )
+                return ChainQAResult(
+                    passed=False,
+                    failure_code="BUTTERFLY_ARBITRAGE_FAILURE",
+                    implied_forward=implied_f,
+                    atm_strike=atm_quote.strike,
+                    atm_call_iv=atm_call_iv,
+                    atm_put_iv=atm_put_iv,
+                    parity_max_deviation_points=max_dev,
+                    notes=notes,
+                )
+
+    for i in range(len(put_priced) - 2):
+        q1, q2, q3 = put_priced[i], put_priced[i + 1], put_priced[i + 2]
+        assert q1.put_mid is not None and q2.put_mid is not None and q3.put_mid is not None
+        if abs((q2.strike - q1.strike) - (q3.strike - q2.strike)) < 1e-6:
+            put_bfly = q1.put_mid - 2.0 * q2.put_mid + q3.put_mid
+            if put_bfly < -arbitrage_epsilon:
+                notes.append(
+                    f"BUTTERFLY_ARBITRAGE_FAILURE: Non-convex put butterfly at {q1.strike}/{q2.strike}/{q3.strike}."
                 )
                 return ChainQAResult(
                     passed=False,

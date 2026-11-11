@@ -196,8 +196,9 @@ class TestOptionChainNormalization(unittest.TestCase):
         s0, s1 = raw["strikes"]
         self.assertEqual((s0["strike"], s0["call_bid"], s0["put_ask"]), (25000.0, 101.5, 89.5))
         self.assertEqual((s0["call_oi"], s0["put_volume"], s0["call_depth_lots"]), (5500, 1100, 120))
-        # ltp fallback when depth missing
-        self.assertEqual((s1["call_bid"], s1["call_ask"], s1["put_bid"]), (77.25, 77.25, 110.1))
+        # LTP-only strike without executable depth MUST remain None (never LTP, never 0.0)
+        self.assertEqual((s1["call_bid"], s1["call_ask"], s1["put_bid"]), (None, None, None))
+        self.assertTrue(s1["call_ltp_only"] and s1["put_ltp_only"])
         # fetch-time stamped for staleness bound
         self.assertEqual(s0["update_time_ist"], DEC.isoformat())
         # different expiry = new service call (no cross-expiry cache bleed)
@@ -221,7 +222,7 @@ class TestOptionChainNormalization(unittest.TestCase):
 
 
 class TestLtpOnlyNotExecutable(unittest.TestCase):
-    def test_ltp_only_side_zeroed_and_ts_source_tagged(self):
+    def test_ltp_only_side_is_none_unknown_never_zero_and_ts_source_tagged(self):
         resp = {"status": "OK", "strikes": [
             {"strike_price": 25000, "CE": {"ltp": 77.25},
              "PE": {"depth": {"best_bid": "88.0", "best_ask": "89.5",
@@ -234,8 +235,11 @@ class TestLtpOnlyNotExecutable(unittest.TestCase):
         self.assertEqual(raw["strikes"][0]["quote_ts_source"], "FETCH_TIME_NOT_EXCHANGE")
         env = parse_and_validate_option_chain(raw, "2026-11-17", DEC)
         q = env.quotes[0]
-        self.assertEqual((q.call_bid, q.call_ask, q.call_depth_lots), (0.0, 0.0, 0),
-                         "LTP-only side must never price an executable leg")
+        self.assertEqual((q.call_bid, q.call_ask, q.call_depth_lots), (None, None, 0),
+                         "LTP-only side must be None (UNKNOWN/unpriced), never LTP and never 0.0")
+        self.assertIsNone(q.call_mid)
+        self.assertFalse(q.has_executable_call)
+        self.assertTrue(q.has_executable_put)
         self.assertEqual((q.put_bid, q.put_ask, q.put_depth_lots), (88.0, 89.5, 140))
         self.assertIn("TS_FETCH_TIME_NOT_EXCHANGE", env.source_verification_tag)
 

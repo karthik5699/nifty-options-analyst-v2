@@ -96,20 +96,29 @@ def evaluate_part_a_rules(
         ),
     )
 
-    # Rule 3: Rs 10,000 portfolio summed-stop cap (zero correlation netting)
+    # Rule 3: Rs 10,000 portfolio summed-stop cap (zero correlation netting; fail-closed on UNKNOWN)
     open_stops = [pos.planned_stop_rs for pos in portfolio_state.open_positions]
     total_summed_stop = compute_portfolio_summed_stop_rs(open_stops, planned_stop_rs)
-    r3_pass = total_summed_stop <= config.portfolio_summed_stop_cap_rs + 1e-6
+    if portfolio_state.portfolio_state_status != "VERIFIED":
+        r3_status: RuleStatus = "UNKNOWN"
+        r3_ev = (
+            f"PORTFOLIO_STATE_UNKNOWN ({portfolio_state.portfolio_state_error or 'open positions unverified'}); "
+            f"fail-closed: cannot assume zero open positions."
+        )
+    else:
+        r3_pass = total_summed_stop <= config.portfolio_summed_stop_cap_rs + 1e-6
+        r3_status = "PASS" if r3_pass else "FAIL"
+        r3_ev = (
+            f"open_positions_count={len(open_stops)}, existing_summed_stops=Rs {sum(open_stops):.2f}, "
+            f"proposed_stop=Rs {planned_stop_rs:.2f}, total_summed_stop=Rs {total_summed_stop:.2f} "
+            f"(cap Rs {config.portfolio_summed_stop_cap_rs:.2f})."
+        )
     checks["RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS"] = PartARuleCheck(
         rule_id="RULE_3_PORTFOLIO_SUMMED_STOP_10000_RS",
         rule_name="Rs 10,000 portfolio summed-stop cap (every position counted in full, no netting)",
         source_date="Standing Rule",
-        status="PASS" if r3_pass else "FAIL",
-        evidence=(
-            f"open_positions_count={len(open_stops)}, existing_summed_stops=Rs {sum(open_stops):.2f}, "
-            f"proposed_stop=Rs {planned_stop_rs:.2f}, total_summed_stop=Rs {total_summed_stop:.2f} "
-            f"(cap Rs {config.portfolio_summed_stop_cap_rs:.2f})."
-        ),
+        status=r3_status,
+        evidence=r3_ev,
     )
 
     # Rule 4: Rs 10,000 per-trade contractual maximum loss ceiling (STT excluded per trader directive)

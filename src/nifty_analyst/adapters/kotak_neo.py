@@ -1,16 +1,19 @@
 """Adapter 2 (Option Chain & Quotes) and Adapter 3 (Historical Index OHLC) for Kotak Neo.
 
-STRICT CONSTRAINTS (Implementation Plan v3, Sections 3 & 10):
+STRICT CONSTRAINTS (Implementation Plan v3, Sections 3 & 10 + 11 Nov Live Review Fixes):
 - Read-only interface: ZERO order placement, modification, or broker write calls exist anywhere.
-- UNVERIFIED INTERFACES: Exact Kotak Neo SDK method names, response schemas, and rate limits
-  are tagged UNVERIFIED and isolated behind KotakNeoReadOnlyPort with a fixture-backed mock
-  for offline execution.
-- Quote-level update_time (IST) is mandatory; quotes missing timestamps are rejected.
-- Max staleness: 180 seconds for active strikes during market hours.
-- Provisional serial rate limiter: default 1 request per 2.5 seconds; any HTTP 429 stops
-  the run immediately and reports with zero automatic retry and zero limit probing.
-- Completed-candle lock: only bars whose close_time_ist <= decision_timestamp_ist are returned,
-  verifying the 6 hourly bars (09:15-15:15) and the final 15-minute bar (15:15-15:30 IST).
+- Targeted two-stage live depth funnel (`P1-1`):
+  1. Fetches option chain structure (`count=40` default, ~81 strikes) WITHOUT `include_depth=True`.
+  2. Shortlists near-ATM + candidate wing + held-position `neo_symbol`s and fetches 5-level depth
+     in verified small batches (`quotes_batch_size=2` default) via `client.quotes(..., quote_type="all")`.
+  3. Normalizes books best-first via `interpret_depth_book`; empty, locked, crossed, unfetched, or
+     LTP-only books are represented as explicit `None` (`UNKNOWN`/unpriced), NEVER `0.0` and NEVER `ltp`.
+  4. Rejected raw depth payloads are preserved for audit logging, and live per-contract `mktLot`
+     drives lot conversion and expiry rupee math.
+- Historical candle safety (`P1-2`):
+  - Enforces `validate_history` (`nse_cm|Nifty 50`, intervals `D` / `60min` / `15min`, `<= 179d` chunks
+    for `D`), handles both bare-list (intraday) and dict-wrapped (daily) payloads, and caches completed
+    prior-day `1D` candles per IST trading date to stay comfortably inside the 35s pacing queue cap.
 """
 
 from __future__ import annotations
@@ -19,10 +22,19 @@ import abc
 import datetime as dt
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
+from nifty_analyst.adapters.request_safety import (
+    PacedCooldownActiveError,
+    PacedQueueCapExceededError,
+    PacedReadTransport,
+    chunk_date_range,
+    interpret_depth_book,
+    validate_history,
+    validate_quotes_batch,
+)
 from nifty_analyst.engine.pricing import RawStrikeQuote
 from nifty_analyst.scrubber import IST, ensure_ist, is_approved_schedule_slot
 from nifty_analyst.state import CandleBar, TimestampedDatum
@@ -57,6 +69,8 @@ class ChainSnapshotEnvelope:
     any_stale: bool
     stale_strikes: list[float]
     source_verification_tag: str
+    lot_size: int | None = None
+    rejected_depth_books: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ProvisionalSerialRateLimiter:
@@ -125,7 +139,7 @@ class FixtureKotakNeoAdapter(KotakNeoReadOnlyPort):
     def __init__(
         self,
         fixtures_dir: str | Path,
-        rate_limiter: ProvisionalSerialRateLimiter | None = None,
+        rate_limiter: ProvisionalSerialRateLimiter | PacedReadTransport | None = None,
         simulate_http_429: bool = False,
         enforce_schedule_in_live_mode: bool = False,
     ) -> None:
@@ -152,7 +166,7 @@ class FixtureKotakNeoAdapter(KotakNeoReadOnlyPort):
             )
 
     def fetch_contract_master_raw(self, decision_dt_ist: dt.datetime) -> dict[str, Any]:
-        cache_key = f"contract_master:{ ensure_ist(decision_dt_ist).date().isoformat() }"
+        cache_key = f"contract_master:{ensure_ist(decision_dt_ist).date().isoformat()}"
         self._guard_request(cache_key, decision_dt_ist)
         if cache_key not in self._cache:
             path = self.fixtures_dir / "contract_master.json"
@@ -209,14 +223,7 @@ class FixtureKotakNeoAdapter(KotakNeoReadOnlyPort):
 
 
 class UnverifiedLiveKotakNeoAdapter(KotakNeoReadOnlyPort):
-    """Isolated stub for live Kotak Neo SDK integration [UNVERIFIED SDK INTERFACE].
-
-    Per Hard Constraint 4:
-    'the exact Kotak Neo SDK method names, response schemas, and rate limits are not verified.
-    Do not invent API calls. Isolate every SDK interaction behind a small adapter interface
-    with a clearly marked fixture-backed mock for offline development, and tag each
-    real-endpoint mapping as UNVERIFIED until confirmed against the actual SDK documentation.'
-    """
+    """Isolated stub for live Kotak Neo SDK integration [UNVERIFIED SDK INTERFACE]."""
 
     ENDPOINT_VERIFICATION_STATUS = "UNVERIFIED"
 
@@ -247,13 +254,36 @@ class UnverifiedLiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         return self._raise_unverified("KOTAK_INDIA_VIX_ENDPOINT_UNVERIFIED")
 
 
+def _coerce_executable_pair(
+    bid_raw: Any, ask_raw: Any, ltp_only: bool
+) -> tuple[float | None, float | None]:
+    """Return `(bid, ask)` ONLY when both are finite positive numbers with `bid < ask`.
+
+    Otherwise returns `(None, None)` — NEVER `0.0` and NEVER `ltp`.
+    """
+    if ltp_only or bid_raw is None or ask_raw is None:
+        return None, None
+    try:
+        b = float(bid_raw)
+        a = float(ask_raw)
+    except (TypeError, ValueError):
+        return None, None
+    if not (b > 0.0 and a > 0.0 and b < a):
+        return None, None
+    return b, a
+
+
 def parse_and_validate_option_chain(
     raw_chain: dict[str, Any],
     expiry_date: str,
     decision_dt_ist: dt.datetime,
     max_staleness_seconds: int = 180,
 ) -> ChainSnapshotEnvelope:
-    """Parse raw option chain quotes, enforcing quote-level update_time and 180s staleness bound."""
+    """Parse raw option chain quotes, enforcing quote-level update_time and 180s staleness bound.
+
+    Missing, LTP-only, empty, locked, or crossed books remain `None` (`UNKNOWN`/unpriced),
+    never `0.0`, preventing zero-price contamination in marks, stops, or Chain QA.
+    """
     dec_ist = ensure_ist(decision_dt_ist)
     strikes_raw = raw_chain.get("strikes", [])
     if not strikes_raw:
@@ -272,20 +302,6 @@ def parse_and_validate_option_chain(
                 f"Option quote at strike {strike_val} (expiry {expiry_date}) is missing "
                 f"mandatory quote-level update_time_ist timestamp."
             )
-        if item.get("call_ltp_only") or item.get("put_ltp_only"):
-            # LTP-only side is not an executable quote; zero its depth fields so downstream
-            # liquidity/entry rules can never price a leg from a bare last-trade print.
-            item = dict(item)
-            if item.get("call_ltp_only"):
-                item["call_bid"] = item["call_ask"] = 0.0
-                item["call_depth_lots"] = 0
-                item["call_bid_depth_lots"] = 0
-                item["call_ask_depth_lots"] = 0
-            if item.get("put_ltp_only"):
-                item["put_bid"] = item["put_ask"] = 0.0
-                item["put_depth_lots"] = 0
-                item["put_bid_depth_lots"] = 0
-                item["put_ask_depth_lots"] = 0
         quote_dt = ensure_ist(dt.datetime.fromisoformat(ts_str))
         quote_times.append(quote_dt)
 
@@ -293,39 +309,49 @@ def parse_and_validate_option_chain(
         if age_sec > max_staleness_seconds or age_sec < -5.0:
             stale_strikes.append(strike_val)
 
+        c_bid, c_ask = _coerce_executable_pair(
+            item.get("call_bid"), item.get("call_ask"), bool(item.get("call_ltp_only"))
+        )
+        p_bid, p_ask = _coerce_executable_pair(
+            item.get("put_bid"), item.get("put_ask"), bool(item.get("put_ltp_only"))
+        )
+
+        c_exec = c_bid is not None and c_ask is not None
+        p_exec = p_bid is not None and p_ask is not None
+
         parsed_quotes.append(
             RawStrikeQuote(
                 strike=strike_val,
-                call_bid=float(item["call_bid"]),
-                call_ask=float(item["call_ask"]),
-                put_bid=float(item["put_bid"]),
-                put_ask=float(item["put_ask"]),
+                call_bid=c_bid,
+                call_ask=c_ask,
+                put_bid=p_bid,
+                put_ask=p_ask,
                 call_oi=int(item.get("call_oi", 0)),
                 put_oi=int(item.get("put_oi", 0)),
                 call_volume=int(item.get("call_volume", 0)),
                 put_volume=int(item.get("put_volume", 0)),
-                call_depth_lots=int(item.get("call_depth_lots", 10)),
-                put_depth_lots=int(item.get("put_depth_lots", 10)),
+                call_depth_lots=int(item.get("call_depth_lots", 10)) if c_exec else 0,
+                put_depth_lots=int(item.get("put_depth_lots", 10)) if p_exec else 0,
                 quote_timestamp_ist=quote_dt.isoformat(),
                 expiry_date=expiry_date,
                 call_bid_depth_lots=(
                     int(item["call_bid_depth_lots"])
-                    if item.get("call_bid_depth_lots") is not None
+                    if (c_exec and item.get("call_bid_depth_lots") is not None)
                     else None
                 ),
                 call_ask_depth_lots=(
                     int(item["call_ask_depth_lots"])
-                    if item.get("call_ask_depth_lots") is not None
+                    if (c_exec and item.get("call_ask_depth_lots") is not None)
                     else None
                 ),
                 put_bid_depth_lots=(
                     int(item["put_bid_depth_lots"])
-                    if item.get("put_bid_depth_lots") is not None
+                    if (p_exec and item.get("put_bid_depth_lots") is not None)
                     else None
                 ),
                 put_ask_depth_lots=(
                     int(item["put_ask_depth_lots"])
-                    if item.get("put_ask_depth_lots") is not None
+                    if (p_exec and item.get("put_ask_depth_lots") is not None)
                     else None
                 ),
             )
@@ -336,6 +362,11 @@ def parse_and_validate_option_chain(
     tag = str(raw_chain.get("verification_tag", "UNVERIFIED_KOTAK_SCHEMA"))
     if ts_sources != {"EXCHANGE"}:
         tag = tag + "|TS_" + "+".join(sorted(ts_sources))
+
+    raw_lot = raw_chain.get("lot_size")
+    chain_lot = int(raw_lot) if (raw_lot is not None and int(raw_lot) > 0) else None
+    rejected_books = list(raw_chain.get("rejected_depth_books") or [])
+
     return ChainSnapshotEnvelope(
         expiry_date=expiry_date,
         quotes=sorted(parsed_quotes, key=lambda q: q.strike),
@@ -344,6 +375,8 @@ def parse_and_validate_option_chain(
         any_stale=len(stale_strikes) > 0,
         stale_strikes=stale_strikes,
         source_verification_tag=tag,
+        lot_size=chain_lot,
+        rejected_depth_books=rejected_books,
     )
 
 
@@ -359,14 +392,128 @@ VALID_1H_OPEN_CLOSE_PAIRS: set[tuple[dt.time, dt.time]] = {
 FINAL_15M_OPEN_CLOSE_PAIR: tuple[dt.time, dt.time] = (dt.time(15, 15), dt.time(15, 30))
 
 
+def _parse_kotak_candle_timestamp(raw_ts: Any, is_daily: bool = False) -> dt.datetime | None:
+    """Parse Kotak historical_data candle timestamp into IST datetime."""
+    if raw_ts is None:
+        return None
+    if isinstance(raw_ts, (int, float)):
+        # Epoch seconds or milliseconds
+        sec = float(raw_ts) / 1000.0 if float(raw_ts) > 1e11 else float(raw_ts)
+        return dt.datetime.fromtimestamp(sec, tz=IST)
+    s = str(raw_ts).strip()
+    if not s:
+        return None
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        d = dt.date.fromisoformat(s)
+        t = dt.time(9, 15) if is_daily else dt.time(0, 0)
+        return dt.datetime.combine(d, t, tzinfo=IST)
+    s_norm = s.replace("Z", "+00:00")
+    try:
+        parsed = dt.datetime.fromisoformat(s_norm)
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d-%m-%Y %H:%M:%S"):
+            try:
+                parsed = dt.datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=IST)
+    return parsed.astimezone(IST)
+
+
+def normalize_kotak_history_rows(resp: Any, interval: str) -> list[dict[str, Any]]:
+    """Normalize both live-verified Kotak historical_data shapes (bare list and dict wrapper)."""
+    if isinstance(resp, list):
+        raw_rows = resp
+    elif isinstance(resp, dict):
+        data = resp.get("data")
+        if isinstance(data, list):
+            raw_rows = data
+        elif isinstance(data, dict):
+            raw_rows = data.get("candles") or data.get("candle") or []
+        else:
+            raw_rows = resp.get("candles") or resp.get("candle") or []
+    else:
+        raw_rows = []
+
+    is_daily = interval in ("D", "W")
+    out: list[dict[str, Any]] = []
+    for c in raw_rows:
+        if isinstance(c, (list, tuple)) and len(c) >= 5:
+            t_raw, o_raw, h_raw, l_raw, cl_raw = c[0], c[1], c[2], c[3], c[4]
+            v_raw = c[5] if len(c) >= 6 else 0.0
+            close_raw = None
+        elif isinstance(c, dict):
+            t_raw = (
+                c.get("open_time_ist")
+                or c.get("open_time")
+                or c.get("datetime")
+                or c.get("time")
+                or c.get("timestamp")
+                or c.get("date")
+                or c.get("dt")
+            )
+            close_raw = c.get("close_time_ist") or c.get("close_time")
+            o_raw = c.get("open") if "open" in c else c.get("o")
+            h_raw = c.get("high") if "high" in c else c.get("h")
+            l_raw = c.get("low") if "low" in c else c.get("l")
+            cl_raw = c.get("close") if "close" in c else c.get("c")
+            v_raw = c.get("volume") if "volume" in c else c.get("vol", 0.0)
+        else:
+            continue
+
+        open_dt = _parse_kotak_candle_timestamp(t_raw, is_daily=is_daily)
+        if open_dt is None:
+            continue
+        if is_daily and open_dt.timetz().replace(tzinfo=None) == dt.time(0, 0):
+            open_dt = open_dt.replace(hour=9, minute=15, second=0, microsecond=0)
+
+        close_dt = _parse_kotak_candle_timestamp(close_raw, is_daily=False) if close_raw else None
+        if close_dt is None:
+            if interval == "D":
+                close_dt = open_dt.replace(hour=15, minute=30, second=0, microsecond=0)
+            elif interval == "W":
+                close_dt = (open_dt + dt.timedelta(days=4)).replace(
+                    hour=15, minute=30, second=0, microsecond=0
+                )
+            elif interval == "60min":
+                session_end = open_dt.replace(hour=15, minute=30, second=0, microsecond=0)
+                close_dt = min(open_dt + dt.timedelta(minutes=60), session_end)
+            elif interval == "15min":
+                close_dt = open_dt + dt.timedelta(minutes=15)
+            else:
+                mins = int(interval.replace("min", "")) if interval.endswith("min") else 60
+                close_dt = open_dt + dt.timedelta(minutes=mins)
+
+        pair = (open_dt.timetz().replace(tzinfo=None), close_dt.timetz().replace(tzinfo=None))
+        if interval == "60min" and pair not in VALID_1H_OPEN_CLOSE_PAIRS:
+            # Skip trailing 15:15-15:30 stub bar emitted inside some 60min feeds; handled by 15min.
+            continue
+        if interval == "15min" and pair != FINAL_15M_OPEN_CLOSE_PAIR:
+            continue
+
+        out.append(
+            {
+                "open_time_ist": open_dt.isoformat(),
+                "close_time_ist": close_dt.isoformat(),
+                "open": float(o_raw or 0.0),
+                "high": float(h_raw or 0.0),
+                "low": float(l_raw or 0.0),
+                "close": float(cl_raw or 0.0),
+                "volume": float(v_raw or 0.0),
+            }
+        )
+    return out
+
+
 def slice_completed_candles(
     raw_candles: dict[str, Any],
     decision_dt_ist: dt.datetime,
 ) -> tuple[list[CandleBar], list[CandleBar], CandleBar | None, int]:
-    """Filter 1D, 1H, and final 15M candles to strictly completed bars (close_time_ist <= decision_dt_ist).
-
-    Returns (completed_1d_bars, completed_1h_bars, completed_final_15m_bar, stripped_forming_count).
-    """
+    """Filter 1D, 1H, and final 15M candles to strictly completed bars (close_time_ist <= decision_dt_ist)."""
     dec_ist = ensure_ist(decision_dt_ist)
     stripped_count = 0
 
@@ -444,22 +591,142 @@ def slice_completed_candles(
     return completed_1d, completed_1h, completed_final_15m, stripped_count
 
 
-class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
-    """Live Kotak Neo SDK adapter [SDK RESPONSE-SCHEMA MAPPINGS UNVERIFIED UNTIL LIVE-TESTED].
+def _select_target_depth_neosymbols(
+    strikes_raw: Sequence[dict[str, Any]],
+    reference_price: float,
+    max_tokens: int = 12,
+    extra_neo_symbols: Sequence[str] = (),
+) -> list[str]:
+    """Select targeted `neo_symbol`s for live `client.quotes` depth pulls (Stage A funnel).
 
-    - Authentication: reuses ~/Kotak_API kotak_option_chain.auth.AuthManager. The daily TOTP
-      login is performed at the dedicated login wake; require_authenticated_client() raises
-      AuthStateError (SETUP_REQUIRED / TOTP_REQUIRED) otherwise - surfaced as KotakAdapterError,
-      never silently bypassed.
-    - Rate limiting: ProvisionalSerialRateLimiter (default 2.5s serial). Any HTTP 429 stops the
-      run immediately with zero retries and zero probing (Hard Constraint).
-    - Schedule guard: optional enforce_schedule_in_live_mode restricts reads to the 5 approved
-      IST run slots.
-    - Caching: one fetch per (endpoint, expiry, decision timestamp) per adapter instance; the
-      pipeline calls each endpoint once per run.
-    - Response-schema mappings reuse ~/Kotak_API kotak_option_chain.option_chain parsing helpers
-      (the reviewed repo code); they remain tagged UNVERIFIED until confirmed against live
-      responses in the first supervised run.
+    Priority order (deduplicated, capped at `max_tokens` so 2-token batches stay <= 35s cap):
+    1. Held-position contracts (`extra_neo_symbols`) present on this chain.
+    2. 3 strikes nearest `reference_price` (`CE` + `PE`, 6 tokens) for put-call parity,
+       synthetic forward `F`, ATM IV anchor, debit long legs, and Iron Butterfly center.
+    3. Primary directional & wing strikes (`~0.30d PE` & `-150`, `~0.30d CE` & `+150`,
+       `+200 CE` debit wing, `ATM-150 PE`, `ATM+150 CE`, plus `4th/5th` near-ATM pairs and
+       `200`-pt / `0.16d` wings when `max_tokens` allows).
+    """
+    if not strikes_raw:
+        return []
+
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ns: Any) -> None:
+        s = str(ns or "").strip()
+        if s and "|" in s and s not in seen and len(selected) < max_tokens:
+            seen.add(s)
+            selected.append(s)
+
+    chain_neos: set[str] = set()
+    by_strike: dict[float, dict[str, Any]] = {}
+    for row in strikes_raw:
+        k = float(row.get("strike_price") or 0.0)
+        if k <= 0.0:
+            continue
+        by_strike[k] = row
+        for side in ("CE", "PE"):
+            ns = (row.get(side) or {}).get("neo_symbol")
+            if ns and "|" in str(ns):
+                chain_neos.add(str(ns).strip())
+
+    # 1. Held open-position tokens belonging to this chain
+    for ns in extra_neo_symbols:
+        if ns in chain_neos:
+            _add(ns)
+
+    if not by_strike:
+        return selected
+
+    strikes_sorted = sorted(by_strike.keys())
+    ref = reference_price if reference_price > 0.0 else strikes_sorted[len(strikes_sorted) // 2]
+    nearest_atm = sorted(strikes_sorted, key=lambda k: abs(k - ref))
+    atm_k = nearest_atm[0]
+
+    # 2. Core 3 near-ATM strikes (CE + PE = 6 tokens)
+    for k in nearest_atm[:3]:
+        row = by_strike[k]
+        _add((row.get("CE") or {}).get("neo_symbol"))
+        _add((row.get("PE") or {}).get("neo_symbol"))
+
+    def _nearest_strike(target_k: float) -> float:
+        return min(strikes_sorted, key=lambda k: abs(k - target_k))
+
+    def _strike_for_indicative_delta(side: str, target_abs_d: float, fallback_offset: float) -> float:
+        best_k: float | None = None
+        best_diff = 999.0
+        for k in strikes_sorted:
+            leg = by_strike[k].get(side) or {}
+            g = leg.get("greeks") if isinstance(leg.get("greeks"), dict) else {}
+            d_val = g.get("delta")
+            if d_val is not None:
+                try:
+                    diff = abs(abs(float(d_val)) - target_abs_d)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_k = k
+                except (TypeError, ValueError):
+                    pass
+        return best_k if best_k is not None else _nearest_strike(ref + fallback_offset)
+
+    # 3. Directional & neutral wing pairs (side-specific so we never waste tokens on deep ITM opposite legs)
+    k_sp30 = _strike_for_indicative_delta("PE", 0.30, -200.0)
+    k_sc30 = _strike_for_indicative_delta("CE", 0.30, +200.0)
+    k_lc45 = _strike_for_indicative_delta("CE", 0.45, +50.0)
+    k_lp45 = _strike_for_indicative_delta("PE", 0.45, -50.0)
+
+    priority_side_strikes: list[tuple[str, float]] = [
+        ("PE", k_sp30),
+        ("PE", _nearest_strike(k_sp30 - 150.0)),
+        ("CE", k_sc30),
+        ("CE", _nearest_strike(k_sc30 + 150.0)),
+        ("CE", _nearest_strike(k_lc45 + 200.0)),
+        ("PE", _nearest_strike(k_lp45 - 150.0)),
+        ("PE", _nearest_strike(atm_k - 150.0)),
+        ("CE", _nearest_strike(atm_k + 150.0)),
+        ("PE", _nearest_strike(k_sp30 - 200.0)),
+        ("CE", _nearest_strike(k_sc30 + 200.0)),
+    ]
+    for side, k in priority_side_strikes:
+        leg = by_strike.get(k, {}).get(side) or {}
+        _add(leg.get("neo_symbol"))
+
+    # 4. Additional near-ATM pairs & IC ~0.16d wings if budget remains
+    for k in nearest_atm[3:5]:
+        row = by_strike[k]
+        _add((row.get("CE") or {}).get("neo_symbol"))
+        _add((row.get("PE") or {}).get("neo_symbol"))
+
+    k_sp16 = _strike_for_indicative_delta("PE", 0.16, -350.0)
+    k_sc16 = _strike_for_indicative_delta("CE", 0.16, +350.0)
+    for side, k in [
+        ("PE", k_sp16),
+        ("PE", _nearest_strike(k_sp16 - 150.0)),
+        ("CE", k_sc16),
+        ("CE", _nearest_strike(k_sc16 + 150.0)),
+    ]:
+        leg = by_strike.get(k, {}).get(side) or {}
+        _add(leg.get("neo_symbol"))
+
+    return selected
+
+
+class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
+    """Live Kotak Neo SDK adapter with targeted `client.quotes` depth and chunked `validate_history`.
+
+    - Authentication: reuses ~/Kotak_API kotak_option_chain.auth.AuthManager.
+    - Rate limiting: `PacedReadTransport` (2.5s serial spacing, 35s queue cap, persisted 429 cooldown)
+      or `ProvisionalSerialRateLimiter`. Any HTTP 429 stops the run immediately with zero retries.
+    - Option chain & depth (`P1-1`, `P3.1`):
+      Calls `get_full_option_chain(..., count=40)` without `include_depth=True`, shortlists target
+      `neo_symbol`s, fetches `client.quotes(..., quote_type="all")` in verified small batches
+      (default 2 tokens/call), normalizes via `interpret_depth_book`, converts raw quantities via
+      live per-contract `mktLot`, and leaves missing/rejected/unfetched books as `None`.
+    - Historical candles (`P1-2`):
+      Calls `client.historical_data(neosymbol="nse_cm|Nifty 50", interval=...)` validated via
+      `validate_history`, chunks `"D"` into `<= 179`-day windows, caches completed prior-day `"D"`
+      bars per IST trading date, and parses both bare-list and dict-wrapper responses.
     """
 
     ENDPOINT_VERIFICATION_STATUS = "UNVERIFIED"
@@ -467,10 +734,14 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
     def __init__(
         self,
         kotak_api_root: str | Path | None = None,
-        rate_limiter: ProvisionalSerialRateLimiter | None = None,
+        rate_limiter: ProvisionalSerialRateLimiter | PacedReadTransport | None = None,
         enforce_schedule_in_live_mode: bool = True,
-        depth_strikes_each_side: int = 10,
-        trading_calendar: dict[str, frozenset] | None = None,
+        depth_strikes_each_side: int = 40,
+        quotes_batch_size: int = 2,
+        max_depth_tokens_per_expiry: int = 12,
+        extra_neo_symbols: Sequence[str] = (),
+        cache_dir: str | Path | None = None,
+        trading_calendar: dict[str, Any] | None = None,
     ) -> None:
         import sys as _sys
 
@@ -487,17 +758,26 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             )
         self._auth = AuthManager(store=ConfigStore())
         self._service = OptionChainService(auth_manager=self._auth)
-        self.rate_limiter = rate_limiter or ProvisionalSerialRateLimiter(min_interval_seconds=2.5)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        cooldown_file = (
+            self.cache_dir / "kotak_429_cooldown.json" if self.cache_dir is not None else None
+        )
+        self.rate_limiter = rate_limiter or PacedReadTransport(
+            min_interval_seconds=2.5,
+            max_queue_wait_seconds=35.0,
+            cooldown_file_path=cooldown_file,
+        )
         self.enforce_schedule = enforce_schedule_in_live_mode
         self.depth_strikes_each_side = depth_strikes_each_side
-        # Verified NSE FO calendar: {"holiday_dates": frozenset, "special_session_dates": frozenset}.
-        # Absent calendar = conservative default (weekends rejected, weekdays allowed).
+        self.quotes_batch_size = max(1, min(50, int(quotes_batch_size)))
+        self.max_depth_tokens_per_expiry = max(4, int(max_depth_tokens_per_expiry))
+        self.extra_neo_symbols = tuple(extra_neo_symbols)
         self.trading_calendar = trading_calendar or {}
         self._cache: dict[str, Any] = {}
 
     # ----- plumbing -----
 
-    def _guard_request(self, cache_key: str, decision_dt_ist: dt.datetime) -> None:
+    def _assert_schedule_approved(self, decision_dt_ist: dt.datetime) -> dt.datetime:
         dec_ist = ensure_ist(decision_dt_ist)
         if self.enforce_schedule and not is_approved_schedule_slot(
             dec_ist,
@@ -509,25 +789,43 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 f"IST run slots (10:15, 11:15, 12:15, 13:15, 14:15 IST) or a verified "
                 f"holiday / non-session date."
             )
-        if cache_key not in self._cache:
-            self.rate_limiter.wait_for_slot()
+        return dec_ist
 
-    def _call(self, cache_key: str, decision_dt_ist: dt.datetime, fn) -> Any:
+    def _guard_request(self, cache_key: str, decision_dt_ist: dt.datetime) -> None:
+        self._assert_schedule_approved(decision_dt_ist)
+        if cache_key not in self._cache:
+            try:
+                self.rate_limiter.wait_for_slot()
+            except PacedCooldownActiveError as exc:
+                raise KotakRateLimit429Error(str(exc)) from exc
+            except PacedQueueCapExceededError as exc:
+                raise KotakAdapterError(str(exc)) from exc
+
+    def _record_429_if_supported(self, reason: str) -> None:
+        rec_fn = getattr(self.rate_limiter, "record_429_cooldown", None)
+        if callable(rec_fn):
+            rec_fn(reason)
+
+    def _call(self, cache_key: str, decision_dt_ist: dt.datetime, fn: Callable[[], Any]) -> Any:
         self._guard_request(cache_key, decision_dt_ist)
         if cache_key in self._cache:
             return self._cache[cache_key]
         try:
             resp = fn()
-        except Exception as exc:  # SDK exceptions - check for rate limit, otherwise surface
+        except KotakAdapterError:
+            raise
+        except Exception as exc:
             msg = str(exc)
             if "429" in msg or "too many" in msg.lower():
+                self._record_429_if_supported(msg)
                 raise KotakRateLimit429Error(
                     f"HTTP 429 from Kotak Neo API ({msg[:200]}). Hard stop; zero retries."
-                )
-            raise
+                ) from exc
+            raise KotakAdapterError(f"Kotak SDK call failed ({cache_key}): {msg}") from exc
         if isinstance(resp, dict):
             status = str(resp.get("status") or resp.get("stCode") or "")
             if "429" in status:
+                self._record_429_if_supported(status)
                 raise KotakRateLimit429Error("HTTP 429 from Kotak Neo API. Hard stop; zero retries.")
             if str(resp.get("status")) == "UNAUTHORIZED" or "session" in str(resp.get("error", "")).lower():
                 raise KotakAdapterError(
@@ -542,7 +840,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
     def fetch_contract_master_raw(self, decision_dt_ist: dt.datetime) -> dict[str, Any]:
         dec_ist = ensure_ist(decision_dt_ist)
         exp_resp = self._call(
-            f"expiries:{dec_ist.date().isoformat()}", dec_ist,
+            f"expiries:{dec_ist.date().isoformat()}",
+            dec_ist,
             lambda: self._service.get_expiries("NIFTY", exchange="nse_fo", instrument_type="option"),
         )
         if exp_resp.get("status") != "OK":
@@ -550,7 +849,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         expiries = list(exp_resp.get("expiries") or [])
 
         fut_resp = self._call(
-            f"futures_chain:{dec_ist.isoformat()}", dec_ist,
+            f"futures_chain:{dec_ist.isoformat()}",
+            dec_ist,
             lambda: self._service.get_futures_chain("NIFTY", exchange="nse_fo"),
         )
         if fut_resp.get("status") != "OK":
@@ -559,16 +859,58 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         if lot_size <= 0:
             raise KotakAdapterError("Kotak futures metadata returned no usable lot size.")
 
-        spot_val = fut_resp.get("nearest_futures_ltp")
+        raw_fut_ltp = fut_resp.get("nearest_futures_ltp")
+        spot_val: float | None = None
         spot_source = "kotak_neo_nearest_futures_ltp"
-        if not spot_val:
-            spot_payload = self._call(
-                f"spot_index:{dec_ist.isoformat()}", dec_ist,
-                lambda: self._service._fetch_spot_quote(self._auth.require_authenticated_client()[0], "NIFTY"),
-            )
-            if spot_payload and spot_payload.get("display_symbol"):
-                raise KotakAdapterError("Index spot quote requires verified ltp mapping; got display only.")
-            raise KotakAdapterError("No usable spot reference from Kotak (futures LTP missing).")
+        if raw_fut_ltp is not None:
+            try:
+                cand_fut = float(raw_fut_ltp)
+                if cand_fut > 0.0:
+                    spot_val = cand_fut
+            except (TypeError, ValueError):
+                spot_val = None
+
+        if spot_val is None:
+            client, _, _ = self._auth.require_authenticated_client()
+            fetch_spot_fn = getattr(self._service, "_fetch_spot_quote", None)
+            if callable(fetch_spot_fn):
+                spot_payload = self._call(
+                    f"spot_index:{dec_ist.isoformat()}",
+                    dec_ist,
+                    lambda: fetch_spot_fn(client, "NIFTY"),
+                )
+            elif hasattr(client, "quotes"):
+                spot_batch = validate_quotes_batch(
+                    [{"exchange_segment": "nse_cm", "instrument_token": "Nifty 50"}]
+                )
+                spot_payload = self._call(
+                    f"spot_index:{dec_ist.isoformat()}",
+                    dec_ist,
+                    lambda: client.quotes(instrument_tokens=spot_batch, quote_type="all"),
+                )
+            else:
+                spot_payload = None
+
+            cand_spot: float | None = None
+            if isinstance(spot_payload, dict) and spot_payload.get("ltp") is not None:
+                try:
+                    cand_spot = float(spot_payload["ltp"])
+                except (TypeError, ValueError):
+                    cand_spot = None
+            elif isinstance(spot_payload, list) and spot_payload and isinstance(spot_payload[0], dict):
+                try:
+                    cand_spot = float(spot_payload[0].get("ltp") or 0.0)
+                except (TypeError, ValueError):
+                    cand_spot = None
+
+            if cand_spot is not None and cand_spot > 0.0:
+                spot_val = cand_spot
+                spot_source = "kotak_neo_index_spot_nse_cm"
+            else:
+                raise KotakAdapterError(
+                    "No usable underlying reference from Kotak: both nearest futures LTP and "
+                    "nse_cm|Nifty 50 index spot LTP are unavailable."
+                )
 
         return {
             "symbol": "NIFTY",
@@ -581,6 +923,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             "expiries": [
                 {
                     "expiry_date": str(e),
+                    # Initial lot_size from futures common_data; overridden per expiry by live
+                    # option chain `mktLot` in `fetch_option_chain_raw` -> `ChainSnapshotEnvelope.lot_size`.
                     "lot_size": lot_size,
                     "is_holiday_adjusted": False,
                     "holiday_note": "",
@@ -590,145 +934,450 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             ],
         }
 
+    def _fetch_targeted_quotes_by_neosymbol(
+        self,
+        neo_symbols: Sequence[str],
+        expiry_date: str,
+        dec_ist: dt.datetime,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        """Fetch `client.quotes(..., quote_type='all')` in verified small batches (default 2 tokens).
+
+        Standing API rule: HTTP 429 or session errors hard-stop immediately with zero retries;
+        a transient non-429 quote failure gets at most ONE retry after `quote_retry_delay_seconds`
+        (default 30.0s) and is then flagged in `failed_errors` (never treated as 0.0).
+        """
+        if not neo_symbols:
+            return {}, {}
+        client, _, _ = self._auth.require_authenticated_client()
+        if not hasattr(client, "quotes"):
+            return {}, {}
+
+        tokens: list[tuple[str, dict[str, str]]] = []
+        for ns in neo_symbols:
+            if not ns or "|" not in ns:
+                continue
+            seg, tok = ns.split("|", 1)
+            seg_s, tok_s = seg.strip(), tok.strip()
+            if seg_s and tok_s:
+                tokens.append((f"{seg_s}|{tok_s}", {"exchange_segment": seg_s, "instrument_token": tok_s}))
+
+        batch_sz = max(1, min(50, int(getattr(self, "quotes_batch_size", 2))))
+        retry_delay = float(getattr(self, "quote_retry_delay_seconds", 30.0))
+        sleep_fn = getattr(self, "_quote_retry_sleep_fn", time.sleep)
+        quotes_by_key: dict[str, dict[str, Any]] = {}
+        failed_errors: dict[str, str] = {}
+
+        for i in range(0, len(tokens), batch_sz):
+            chunk = tokens[i : i + batch_sz]
+            validated_batch = validate_quotes_batch([t[1] for t in chunk])
+            batch_id = ",".join(t[0] for t in chunk)
+            try:
+                resp = self._call(
+                    f"quotes:{expiry_date}:{dec_ist.isoformat()}:{batch_id}",
+                    dec_ist,
+                    lambda b=validated_batch: client.quotes(instrument_tokens=b, quote_type="all"),
+                )
+            except (KotakRateLimit429Error, UnapprovedScheduleSlotError):
+                raise
+            except KotakAdapterError as first_exc:
+                if "re-authentication" in str(first_exc) or "queue cap" in str(first_exc).lower():
+                    raise
+                if retry_delay > 0.0:
+                    sleep_fn(retry_delay)
+                try:
+                    resp = self._call(
+                        f"quotes:{expiry_date}:{dec_ist.isoformat()}:{batch_id}:retry1",
+                        dec_ist,
+                        lambda b=validated_batch: client.quotes(instrument_tokens=b, quote_type="all"),
+                    )
+                except (KotakRateLimit429Error, UnapprovedScheduleSlotError):
+                    raise
+                except KotakAdapterError as retry_exc:
+                    if "re-authentication" in str(retry_exc) or "queue cap" in str(retry_exc).lower():
+                        raise
+                    for ns_key, _ in chunk:
+                        failed_errors[ns_key] = f"QUOTE_FETCH_FAILED_AFTER_RETRY:{retry_exc}"
+                    continue
+
+            items: list[Any]
+            if isinstance(resp, list):
+                items = resp
+            elif isinstance(resp, dict) and isinstance(resp.get("data"), list):
+                items = resp["data"]
+            else:
+                items = []
+
+            for q in items:
+                if not isinstance(q, dict):
+                    continue
+                exch = str(q.get("exchange") or q.get("exchange_segment") or "").strip()
+                etok = str(
+                    q.get("exchange_token") or q.get("instrument_token") or q.get("tk") or ""
+                ).strip()
+                if exch and etok:
+                    quotes_by_key[f"{exch}|{etok}"] = q
+                if etok:
+                    quotes_by_key.setdefault(etok, q)
+
+        return quotes_by_key, failed_errors
+
     def fetch_option_chain_raw(
-        self, expiry_date: str, decision_dt_ist: dt.datetime
+        self,
+        expiry_date: str,
+        decision_dt_ist: dt.datetime,
+        fetch_depth: bool = True,
     ) -> dict[str, Any]:
         dec_ist = ensure_ist(decision_dt_ist)
+        strike_count = int(getattr(self, "depth_strikes_each_side", 40))
+        # Never pass include_depth=True: OptionChainService._fetch_depth_by_neosymbol uses
+        # 25-token batches with 0.04s sleep and swallows 400/429 exceptions.
         resp = self._call(
-            f"chain:{expiry_date}:{dec_ist.isoformat()}", dec_ist,
+            f"chain:{expiry_date}:{dec_ist.isoformat()}",
+            dec_ist,
             lambda: self._service.get_full_option_chain(
-                "NIFTY", exchange="nse_fo", expiry=expiry_date, count=self.depth_strikes_each_side,
+                "NIFTY", exchange="nse_fo", expiry=expiry_date, count=strike_count
             ),
         )
         if resp.get("status") != "OK":
             raise KotakAdapterError(f"Kotak option chain fetch failed for {expiry_date}: {resp}")
         strikes_raw = resp.get("strikes") or resp.get("chain") or []
+
+        raw_lot = resp.get("lot_size")
+        expiry_lot_size = int(raw_lot) if raw_lot is not None else 0
+        if expiry_lot_size <= 0:
+            # Check if futures metadata already cached a lot size in this run
+            fut_cached = self._cache.get(f"futures_chain:{dec_ist.isoformat()}") or {}
+            expiry_lot_size = int(fut_cached.get("lot_size") or 0)
+
+        underlying_info = resp.get("underlying_prices") if isinstance(resp.get("underlying_prices"), dict) else {}
+        ref_price = float(
+            underlying_info.get("reference_price")
+            or underlying_info.get("futures_price")
+            or underlying_info.get("spot_price")
+            or 0.0
+        )
+
+        max_tokens = int(getattr(self, "max_depth_tokens_per_expiry", 12))
+        extra_neos = tuple(getattr(self, "extra_neo_symbols", ()))
+        shortlisted_neos = (
+            _select_target_depth_neosymbols(
+                strikes_raw=strikes_raw,
+                reference_price=ref_price,
+                max_tokens=max_tokens,
+                extra_neo_symbols=extra_neos,
+            )
+            if fetch_depth
+            else []
+        )
+        shortlisted_set = set(shortlisted_neos)
+        quotes_map, failed_quote_errors = (
+            self._fetch_targeted_quotes_by_neosymbol(shortlisted_neos, expiry_date, dec_ist)
+            if shortlisted_neos
+            else ({}, {})
+        )
+
+        if quotes_map and expiry_lot_size <= 0:
+            # Check if any quote payload itself carries mktLot
+            for q_item in quotes_map.values():
+                cand_lot = q_item.get("mktLot") or q_item.get("lot_size") or q_item.get("lotSize")
+                if cand_lot is not None and int(cand_lot) > 0:
+                    expiry_lot_size = int(cand_lot)
+                    break
+            if expiry_lot_size <= 0:
+                raise KotakAdapterError(
+                    f"Option chain for {expiry_date} is missing live mktLot / lot_size; "
+                    "cannot convert raw depth quantities to lots."
+                )
+
+        resolved_contract_lots: set[int] = set()
+        rejected_depth_books: list[dict[str, Any]] = []
         strikes: list[dict[str, Any]] = []
+
+        def _resolve_leg_book(
+            leg: dict[str, Any], strike_val: float, opt_type: str
+        ) -> tuple[float | None, float | None, int, int | None, int | None, bool]:
+            ns = str(leg.get("neo_symbol") or "").strip()
+            tok_only = ns.split("|", 1)[1].strip() if "|" in ns else ""
+
+            if ns and ns in shortlisted_set:
+                if ns in failed_quote_errors:
+                    rejected_depth_books.append(
+                        {
+                            "expiry_date": expiry_date,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "neo_symbol": ns,
+                            "rejection_reason": failed_quote_errors[ns],
+                            "raw_payload": None,
+                        }
+                    )
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+                q_payload = quotes_map.get(ns) or (quotes_map.get(tok_only) if tok_only else None)
+                if q_payload is not None or quotes_map:
+                    parsed_book = interpret_depth_book(q_payload, fallback_lot_size=expiry_lot_size)
+                    if parsed_book.is_executable:
+                        resolved_contract_lots.add(parsed_book.resolved_lot_size)
+                        b_lots = parsed_book.bid_depth_lots or 0
+                        a_lots = parsed_book.ask_depth_lots or 0
+                        conservative_lots = min(b_lots, a_lots) if (b_lots and a_lots) else (b_lots or a_lots)
+                        return (
+                            parsed_book.best_bid,
+                            parsed_book.best_ask,
+                            conservative_lots,
+                            parsed_book.bid_depth_lots,
+                            parsed_book.ask_depth_lots,
+                            False,
+                        )
+                    rejected_depth_books.append(
+                        {
+                            "expiry_date": expiry_date,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "neo_symbol": ns,
+                            "rejection_reason": parsed_book.rejection_reason,
+                            "raw_payload": parsed_book.raw_payload,
+                        }
+                    )
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+
+            # Support synthetic unit-test chain payloads that embed pre-normalized `market_depth` / `depth`
+            inline_md = leg.get("market_depth") or leg.get("depth")
+            if isinstance(inline_md, dict) and inline_md:
+                if isinstance(inline_md.get("buy"), list) or isinstance(inline_md.get("sell"), list):
+                    parsed_inline = interpret_depth_book(
+                        {"depth": inline_md, "mktLot": expiry_lot_size},
+                        fallback_lot_size=expiry_lot_size,
+                    )
+                    if parsed_inline.is_executable:
+                        resolved_contract_lots.add(parsed_inline.resolved_lot_size)
+                        b_l = parsed_inline.bid_depth_lots or 0
+                        a_l = parsed_inline.ask_depth_lots or 0
+                        return (
+                            parsed_inline.best_bid,
+                            parsed_inline.best_ask,
+                            min(b_l, a_l) if (b_l and a_l) else (b_l or a_l),
+                            parsed_inline.bid_depth_lots,
+                            parsed_inline.ask_depth_lots,
+                            False,
+                        )
+                    rejected_depth_books.append(
+                        {
+                            "expiry_date": expiry_date,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "neo_symbol": ns,
+                            "rejection_reason": parsed_inline.rejection_reason,
+                            "raw_payload": parsed_inline.raw_payload,
+                        }
+                    )
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+
+                b_val, a_val = _coerce_executable_pair(
+                    inline_md.get("best_bid"), inline_md.get("best_ask"), False
+                )
+                if b_val is not None and a_val is not None:
+                    lot_div = expiry_lot_size if expiry_lot_size > 0 else 1
+                    buy_lots = (
+                        int(inline_md["total_buy_qty_lots"])
+                        if inline_md.get("total_buy_qty_lots") is not None
+                        else (
+                            int(inline_md["total_buy_qty"]) // lot_div
+                            if inline_md.get("total_buy_qty") is not None and expiry_lot_size > 0
+                            else None
+                        )
+                    )
+                    sell_lots = (
+                        int(inline_md["total_sell_qty_lots"])
+                        if inline_md.get("total_sell_qty_lots") is not None
+                        else (
+                            int(inline_md["total_sell_qty"]) // lot_div
+                            if inline_md.get("total_sell_qty") is not None and expiry_lot_size > 0
+                            else None
+                        )
+                    )
+                    d_lots = (
+                        min(buy_lots, sell_lots)
+                        if (buy_lots is not None and sell_lots is not None)
+                        else int(buy_lots or sell_lots or 0)
+                    )
+                    return b_val, a_val, d_lots, buy_lots, sell_lots, False
+
+                rejected_depth_books.append(
+                    {
+                        "expiry_date": expiry_date,
+                        "strike": strike_val,
+                        "option_type": opt_type,
+                        "neo_symbol": ns,
+                        "rejection_reason": "INLINE_BOOK_NON_EXECUTABLE",
+                        "raw_payload": dict(inline_md),
+                    }
+                )
+
+            # Unfetched or LTP-only strike: NEVER substitute LTP or 0.0 as bid/ask.
+            return None, None, 0, None, None, bool(leg.get("ltp") is not None)
+
         for row in strikes_raw:
+            strike_val = float(row.get("strike_price") or 0.0)
             ce = row.get("CE") or {}
             pe = row.get("PE") or {}
-            # Timestamp semantics (7 Nov 2026 decision): a last-trade time (ltp_timestamp,
-            # last_trade_time) is NOT a bid/ask quote as-of, and no field's semantics are
-            # verified until the first live session. Candidate fields are preserved verbatim
-            # for inspection but NEVER drive the staleness bound until semantics are verified.
-            exch_ts = None
-            ts_candidates = {}
-            for cand in ("exchange_timestamp_ist", "quote_updated_at", "updated_at",
-                         "last_update", "timestamp", "ltp_timestamp", "last_trade_time"):
+
+            ts_candidates: dict[str, str] = {}
+            for cand in (
+                "exchange_timestamp_ist",
+                "quote_updated_at",
+                "updated_at",
+                "last_update",
+                "lstup_time",
+                "timestamp",
+                "ltp_timestamp",
+                "last_trade_time",
+            ):
                 v = row.get(cand) or ce.get(cand) or pe.get(cand)
                 if v:
                     ts_candidates[cand] = str(v)
-            ce_depth = ce.get("depth") or {}
-            pe_depth = pe.get("depth") or {}
-            ce_ltp_only = not ce_depth and ce.get("ltp") is not None
-            pe_ltp_only = not pe_depth and pe.get("ltp") is not None
-            ce_buy_lots = (
-                int(ce_depth["total_buy_qty_lots"])
-                if ce_depth.get("total_buy_qty_lots") is not None
-                else None
+
+            c_bid, c_ask, c_lots, c_b_lots, c_a_lots, ce_ltp_only = _resolve_leg_book(
+                ce, strike_val, "CE"
             )
-            ce_sell_lots = (
-                int(ce_depth["total_sell_qty_lots"])
-                if ce_depth.get("total_sell_qty_lots") is not None
-                else None
+            p_bid, p_ask, p_lots, p_b_lots, p_a_lots, pe_ltp_only = _resolve_leg_book(
+                pe, strike_val, "PE"
             )
-            pe_buy_lots = (
-                int(pe_depth["total_buy_qty_lots"])
-                if pe_depth.get("total_buy_qty_lots") is not None
-                else None
-            )
-            pe_sell_lots = (
-                int(pe_depth["total_sell_qty_lots"])
-                if pe_depth.get("total_sell_qty_lots") is not None
-                else None
-            )
+
             strikes.append(
                 {
-                    "strike": float(row.get("strike_price") or 0.0),
-                    "call_bid": float(ce_depth.get("best_bid") or ce.get("ltp") or 0.0),
-                    "call_ask": float(ce_depth.get("best_ask") or ce.get("ltp") or 0.0),
-                    "put_bid": float(pe_depth.get("best_bid") or pe.get("ltp") or 0.0),
-                    "put_ask": float(pe_depth.get("best_ask") or pe.get("ltp") or 0.0),
+                    "strike": strike_val,
+                    "call_bid": c_bid,
+                    "call_ask": c_ask,
+                    "put_bid": p_bid,
+                    "put_ask": p_ask,
                     "call_oi": int(ce.get("oi_current") or 0),
                     "put_oi": int(pe.get("oi_current") or 0),
                     "call_volume": int(ce.get("volume") or 0),
                     "put_volume": int(pe.get("volume") or 0),
-                    "call_depth_lots": int(
-                        ce_depth.get("total_buy_qty_lots")
-                        or ce_depth.get("total_sell_qty_lots")
-                        or 0
-                    ),
-                    "put_depth_lots": int(
-                        pe_depth.get("total_sell_qty_lots")
-                        or pe_depth.get("total_buy_qty_lots")
-                        or 0
-                    ),
-                    "call_bid_depth_lots": ce_buy_lots,
-                    "call_ask_depth_lots": ce_sell_lots,
-                    "put_bid_depth_lots": pe_buy_lots,
-                    "put_ask_depth_lots": pe_sell_lots,
-                    # LTP is a last-trade print, not an executable quote: flag it so no leg is
-                    # ever priced as executable from LTP alone (depth lots stay 0).
+                    "call_depth_lots": c_lots,
+                    "put_depth_lots": p_lots,
+                    "call_bid_depth_lots": c_b_lots,
+                    "call_ask_depth_lots": c_a_lots,
+                    "put_bid_depth_lots": p_b_lots,
+                    "put_ask_depth_lots": p_a_lots,
                     "call_ltp_only": ce_ltp_only,
                     "put_ltp_only": pe_ltp_only,
-                    # Staleness always measures retrieval freshness until a verified quote-
-                    # update timestamp exists; live readiness stays BLOCKED meanwhile.
                     "update_time_ist": dec_ist.isoformat(),
                     "quote_ts_source": "FETCH_TIME_NOT_EXCHANGE",
                     "exchange_ts_candidates": ts_candidates,
                 }
             )
+
+        if len(resolved_contract_lots) == 1:
+            final_lot_size = next(iter(resolved_contract_lots))
+        elif len(resolved_contract_lots) > 1:
+            raise KotakAdapterError(
+                f"Inconsistent live mktLot values within single expiry {expiry_date}: {sorted(resolved_contract_lots)}"
+            )
+        else:
+            final_lot_size = expiry_lot_size
+
         return {
             "verification_tag": "UNVERIFIED_KOTAK_SCHEMA",
+            "lot_size": final_lot_size if final_lot_size > 0 else None,
+            "shortlisted_neo_symbols": shortlisted_neos,
+            "rejected_depth_books": rejected_depth_books,
             "strikes": strikes,
         }
 
     def fetch_index_candles_raw(self, decision_dt_ist: dt.datetime) -> dict[str, Any]:
         dec_ist = ensure_ist(decision_dt_ist)
         client, _, _ = self._auth.require_authenticated_client()
+        neosymbol = "nse_cm|Nifty 50"
 
-        def _hist(interval: str, days: int) -> Any:
-            from_dt = (dec_ist - dt.timedelta(days=days)).strftime("%Y-%m-%d")
-            to_dt = dec_ist.strftime("%Y-%m-%d")
+        upstream_validate: Callable[..., Any] | None = None
+        try:
+            from kotak_option_chain.request_safety import validate_history as _up_vh  # type: ignore[import-not-found]
+
+            upstream_validate = _up_vh
+        except Exception:
+            upstream_validate = None
+
+        def _validated_hist_call(interval: str, from_str: str, to_str: str) -> Any:
+            validate_history(neosymbol, interval, from_str, to_str)
+            if callable(upstream_validate):
+                upstream_validate(
+                    neosymbol=neosymbol,
+                    interval=interval,
+                    from_date=from_str,
+                    to_date=to_str,
+                )
             return self._call(
-                f"hist:{interval}:{from_dt}:{to_dt}", dec_ist,
+                f"hist:{neosymbol}:{interval}:{from_str}:{to_str}",
+                dec_ist,
                 lambda: client.historical_data(
-                    neosymbol="Nifty 50", interval=interval, from_date=from_dt, to_date=to_dt
+                    neosymbol=neosymbol,
+                    interval=interval,
+                    from_date=from_str,
+                    to_date=to_str,
                 ),
             )
 
-        def _rows(resp: Any) -> list[dict[str, Any]]:
-            data = (resp.get("data") if isinstance(resp, dict) else resp) or []
-            if isinstance(data, dict):
-                data = data.get("candles") or data.get("candle") or []
-            out = []
-            for c in data:
-                t_open = c.get("time") or c.get("open_time") or c.get("timestamp") or ""
-                out.append(
-                    {
-                        "open_time_ist": str(t_open),
-                        "close_time_ist": str(c.get("close_time") or ""),
-                        "open": float(c.get("open") or c.get("o") or 0.0),
-                        "high": float(c.get("high") or c.get("h") or 0.0),
-                        "low": float(c.get("low") or c.get("l") or 0.0),
-                        "close": float(c.get("close") or c.get("c") or 0.0),
-                        "volume": float(c.get("volume") or c.get("vol") or 0.0),
-                    }
-                )
-            return out
+        def _fetch_chunked_rows(
+            interval: str, total_days: int, max_chunk_days: int
+        ) -> list[dict[str, Any]]:
+            end_d = dec_ist.date()
+            start_d = end_d - dt.timedelta(days=total_days)
+            merged_by_open: dict[str, dict[str, Any]] = {}
+            for c_from, c_to in chunk_date_range(start_d, end_d, max_chunk_days=max_chunk_days):
+                resp = _validated_hist_call(interval, c_from, c_to)
+                for row in normalize_kotak_history_rows(resp, interval):
+                    merged_by_open[row["open_time_ist"]] = row
+            return [merged_by_open[k] for k in sorted(merged_by_open.keys())]
+
+        # Completed 1D candles never mutate across the 10:15-14:15 IST intraday slots on the same date.
+        cache_dir = getattr(self, "cache_dir", None)
+        d1_cache_file = (
+            Path(cache_dir) / f"nifty_1d_completed_{dec_ist.date().isoformat()}.json"
+            if cache_dir
+            else None
+        )
+        candles_1d: list[dict[str, Any]] | None = None
+        if d1_cache_file is not None and d1_cache_file.exists():
+            # Enforce schedule guard without consuming a network pacing slot for local disk cache
+            self._assert_schedule_approved(dec_ist)
+            try:
+                cached_rows = json.loads(d1_cache_file.read_text(encoding="utf-8"))
+                if isinstance(cached_rows, list) and cached_rows:
+                    candles_1d = cached_rows
+            except Exception:
+                candles_1d = None
+
+        if candles_1d is None:
+            candles_1d = _fetch_chunked_rows("D", total_days=400, max_chunk_days=179)
+            if d1_cache_file is not None and candles_1d:
+                try:
+                    d1_cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    completed_prior = [
+                        r
+                        for r in candles_1d
+                        if ensure_ist(dt.datetime.fromisoformat(r["close_time_ist"])) <= dec_ist
+                    ]
+                    if completed_prior:
+                        tmp_f = d1_cache_file.with_suffix(".tmp")
+                        tmp_f.write_text(json.dumps(completed_prior), encoding="utf-8")
+                        tmp_f.replace(d1_cache_file)
+                except Exception:
+                    pass
+
+        candles_1h = _fetch_chunked_rows("60min", total_days=30, max_chunk_days=89)
+        candles_15m = _fetch_chunked_rows("15min", total_days=10, max_chunk_days=89)
 
         return {
-            "candles_1d": _rows(_hist("1day", 400)),
-            "candles_1h": _rows(_hist("60minute", 30)),
-            "candles_15m_closing": _rows(_hist("15minute", 10)),
+            "candles_1d": candles_1d,
+            "candles_1h": candles_1h,
+            "candles_15m_closing": candles_15m,
         }
 
     def fetch_india_vix_raw(
         self, decision_dt_ist: dt.datetime
     ) -> TimestampedDatum[float | None]:
         dec_ist = ensure_ist(decision_dt_ist)
-        # No verified Kotak VIX endpoint [UNVERIFIED]; VIX stays context-only per plan, so a
-        # missing value must not block the run. Report None with an UNVERIFIED tag.
         return TimestampedDatum.create(
             value=None,
             as_of_dt=dec_ist,

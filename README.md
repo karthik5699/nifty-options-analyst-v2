@@ -2,7 +2,7 @@
 
 Quantitative read-only research and defined-risk strategy desk for **NIFTY 50 Index Options**, combining a **100% deterministic Black-76 & surface-analytics engine** with **single-pass multi-persona synthesis** inspired by [*TradingAgents: Multi-Agents LLM Financial Trading Framework*](https://arxiv.org/abs/2412.20138) (Xiao et al., 2024).
 
-> **Live Merge & Review Notes (11 Nov 2026)**: See [`docs/v2_live_merge_notes_for_instinct.md`](docs/v2_live_merge_notes_for_instinct.md) for the item-by-item verification of Instinct's live Kotak API review (`P1-1` through `P3`) and the three architectural merge guards (`RawStrikeQuote` two-stage depth funnel, `35s` request-budget caching, and STT-free / single-pass persona preservation) required before running `v2` against live broker endpoints.
+> **Live Merge & Review Notes (11 Nov 2026)**: See [`docs/v2_live_merge_notes_for_instinct.md`](docs/v2_live_merge_notes_for_instinct.md) for the item-by-item implementation record of Instinct's live Kotak API review (`P1-1` through `P3`), the three architectural merge guards (`RawStrikeQuote` nullable two-stage depth funnel, `35s` request-budget `1D` caching, and STT-free / single-pass persona preservation), and the supervised read-only verification runner (`nifty_analyst.operations.live_verify`).
 
 > **Scope & Hard Compliance Boundaries**
 > - **Strictly Read-Only**: Zero order placement, modification, cancellation, or broker write calls exist anywhere in the codebase (enforced via AST regression tests).
@@ -44,9 +44,9 @@ nifty_options_analyst/
 ├── pyproject.toml
 ├── requirements.txt
 ├── .env.example                         # Config template (store real secrets outside repo with chmod 600)
-├── run_tests.py                         # Zero-dependency test runner (40 suites / checks)
+├── run_tests.py                         # Zero-dependency test runner (48 suites / 71 checks)
 ├── docs/
-│   ├── v2_live_merge_notes_for_instinct.md # Live review verification & 3 merge architecture guards
+│   ├── v2_live_merge_notes_for_instinct.md # Live review implementation notes & 3 merge guards
 │   ├── implementation_plan_v3.md        # Core compliance & domain specification
 │   ├── build_prompt.txt                 # Original build specification
 │   ├── sample_offline_report.md         # Full 7-section sample report from bundled fixtures
@@ -63,12 +63,17 @@ nifty_options_analyst/
 │   ├── scrubber.py                      # IST slot validator & tokenized PII/credential scrubber
 │   ├── state.py                         # Typed JSON-serialisable NiftyOptionsState
 │   ├── pipeline.py                      # End-to-end 4-layer pipeline orchestrator
-│   ├── cli.py                           # CLI entry point (`nifty-analyst`)
+│   ├── cli.py                           # CLI entry point (`nifty-analyst`, incl. `--open-positions`)
 │   ├── adapters/
 │   │   ├── calendar_and_contracts.py    # Contract master & holiday/special-session NSE calendar
-│   │   ├── kotak_neo.py                 # Read-only Kotak Neo adapter, 180s staleness & 429 halt
+│   │   ├── request_safety.py            # History/quotes validators, depth sorter & PacedReadTransport
+│   │   ├── open_positions.py            # Fail-closed open_positions.json loader for Part A Rule 3
+│   │   ├── kotak_neo.py                 # Two-stage targeted depth adapter, chunked history & 429 halt
 │   │   ├── eod_vix_events.py            # Point-in-time EOD IVP loader, VIX & event calendar adapters
 │   │   └── iv_history_builder.py        # Pure-Python NSE UDiFF EOD CM30 IV archive builder CLI
+│   ├── operations/
+│   │   ├── decision_driver.py           # Calendar-aware IST slot driver & SingleInstanceFileLock
+│   │   └── live_verify.py               # Supervised read-only verification runner (Section 7)
 │   ├── engine/
 │   │   ├── pricing.py                   # Black-76, BSM, Brent IV, CM30 interpolation, Greeks & Chain QA
 │   │   ├── detectors.py                 # Completed-candle technicals (RSI, ATR, Z-score) & regime detectors

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import sys
 from pathlib import Path
@@ -26,6 +27,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--expiry",
         default=None,
         help="Optional target expiry date YYYY-MM-DD from the contract master",
+    )
+    parser.add_argument(
+        "--open-positions",
+        default=None,
+        help=(
+            "Optional path to open_positions.json overriding NIFTY_OPEN_POSITIONS_FILE "
+            "(fails closed to PORTFOLIO_STATE_UNKNOWN when missing or unreadable)"
+        ),
     )
     parser.add_argument(
         "--inspect-offline",
@@ -71,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
 
     dec_dt = ensure_ist(dt.datetime.fromisoformat(args.decision_time_ist)).astimezone(IST)
     config = AnalystConfig.from_env()
+    if args.open_positions is not None:
+        config = dataclasses.replace(config, open_positions_file=args.open_positions)
     state, delivery = run_analyst_pipeline(
         decision_dt_ist=dec_dt,
         config=config,

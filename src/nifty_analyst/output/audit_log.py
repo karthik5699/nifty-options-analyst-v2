@@ -40,11 +40,13 @@ def append_immutable_audit_record(
     report_markdown: str,
     audit_log_path: str | Path,
     scrubber: SecretScrubber | None = None,
+    extra_audit_metadata: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Append an immutable JSONL record of inputs and outputs (zero outcomes/P&L)."""
     scrubber = scrubber or SecretScrubber()
     state_dict = scrubber.scrub_obj(state.to_dict())
     clean_report = scrubber.scrub_text(report_markdown)
+    clean_extra = scrubber.scrub_obj(extra_audit_metadata) if extra_audit_metadata else None
 
     verdict = state.final_output.verdict if state.final_output else "INSUFFICIENT DATA"
     record_body: dict[str, Any] = {
@@ -68,6 +70,8 @@ def append_immutable_audit_record(
         "final_output": state_dict["final_output"],
         "report_markdown": clean_report,
     }
+    if clean_extra:
+        record_body["adapter_diagnostics"] = clean_extra
 
     canonical_json = json.dumps(record_body, sort_keys=True)
     record_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
@@ -86,6 +90,8 @@ def deliver_run_output(
     audit_log_path: str | Path,
     scrubber: SecretScrubber | None = None,
     force_render_for_inspection: bool = False,
+    suppress_trader_alerts: bool = False,
+    extra_audit_metadata: dict[str, Any] | None = None,
 ) -> AuditDeliveryResult:
     """Enforce alert-only delivery policy and write immutable audit record."""
     scrubber = scrubber or SecretScrubber()
@@ -100,10 +106,14 @@ def deliver_run_output(
         report_markdown=full_report,
         audit_log_path=audit_log_path,
         scrubber=scrubber,
+        extra_audit_metadata=extra_audit_metadata,
     )
 
     verdict = state.final_output.verdict if state.final_output else "INSUFFICIENT DATA"
-    suppressed = bool(state.final_output and state.final_output.duplicate_alert_suppressed)
+    suppressed = bool(
+        suppress_trader_alerts
+        or (state.final_output and state.final_output.duplicate_alert_suppressed)
+    )
     alerted = (
         verdict == "SUGGESTION"
         and bool(state.final_output and state.final_output.is_live_ready)

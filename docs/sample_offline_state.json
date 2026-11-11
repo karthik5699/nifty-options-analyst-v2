@@ -1,13 +1,13 @@
 {
   "run_metadata": {
-    "run_id": "run_20261106_101500_4eacc9",
+    "run_id": "run_20261106_101500_7f6858",
     "decision_timestamp_ist": "2026-11-06T10:15:00+05:30",
     "mode": "OFFLINE",
     "data_version_hash": "d165528354990f5e",
     "model_ids": [
       "qwen2.5:14b-instruct"
     ],
-    "config_hash": "4eacc966c50b61f9",
+    "config_hash": "7f68583fae45b37a",
     "scheduled_slot_approved": true
   },
   "contract_context": {
@@ -61,7 +61,9 @@
       "BULLISH": [],
       "BEARISH": [],
       "NEUTRAL": []
-    }
+    },
+    "portfolio_state_status": "VERIFIED",
+    "portfolio_state_error": ""
   },
   "market_evidence": {
     "price_structure": {

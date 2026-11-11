@@ -3,11 +3,11 @@
 ## 1. Header & Data Freshness Banner
 - **Verdict**: **SUGGESTION**
 - **Readiness Status**: **LIVE-READY (All Part A & IVP Gates Verified)**
-- **Run ID**: `run_20261106_101500_4eacc9`
+- **Run ID**: `run_20261106_101500_7f6858`
 - **Decision Timestamp (IST)**: `2026-11-06T10:15:00+05:30`
 - **Data Mode**: `OFFLINE` (Scheduled Slot Approved: `True`)
 - **NIFTY Spot**: `24200.00` (as-of `2026-11-06T10:14:40+05:30`, stale=`False`, source=`kotak_neo_scrip_master_fixture`)
-- **Data Version Hash**: `d165528354990f5e` | **Config Hash**: `4eacc966c50b61f9`
+- **Data Version Hash**: `d165528354990f5e` | **Config Hash**: `7f68583fae45b37a`
 - **Active Contract-Master Expiries (Zero Hardcoded Weekdays/Lot Sizes)**:
   - Expiry `2026-11-12`: **3 trading session(s) DTE**, **Lot Size = 75**, Holiday-Adjusted = `False`
   - Expiry `2026-11-19`: **8 trading session(s) DTE**, **Lot Size = 75**, Holiday-Adjusted = `False`

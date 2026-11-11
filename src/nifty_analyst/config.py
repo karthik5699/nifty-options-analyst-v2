@@ -26,6 +26,10 @@ class AnalystConfig:
 
     # Provisional unverified serial request-rate limit (Section 3, Adapter 2)
     kotak_min_request_interval_seconds: float = 2.5
+    kotak_max_queue_wait_seconds: float = 35.0
+    kotak_chain_strike_count: int = 40
+    kotak_quotes_batch_size: int = 2
+    kotak_max_depth_tokens_per_expiry: int = 12
     max_quote_staleness_seconds: int = 180
     kotak_api_root: str = ""
 
@@ -71,6 +75,7 @@ class AnalystConfig:
     holidays_file_path: str = ""
     eod_archive_path: str = ""
     events_file_path: str = ""
+    open_positions_file: str = ""
     payoff_chart_dir: str = ""
     cache_dir: str = ""
     audit_log_path: str = ""
@@ -106,6 +111,13 @@ class AnalystConfig:
         if self.events_file_path:
             return Path(self.events_file_path)
         return Path(self.fixtures_dir) / "vix_and_events.json"
+
+    def resolved_open_positions_path(self) -> Path | None:
+        if self.open_positions_file:
+            return Path(self.open_positions_file).expanduser()
+        if self.mode == "LIVE_MORNING_SNAPSHOT":
+            return Path.home() / "nifty-analyst" / "open_positions.json"
+        return None
 
     @classmethod
     def from_env(cls, repo_root: Path | None = None) -> AnalystConfig:
@@ -147,6 +159,14 @@ class AnalystConfig:
             kotak_min_request_interval_seconds=float(
                 env.get("KOTAK_MIN_REQUEST_INTERVAL_SECONDS", "2.5")
             ),
+            kotak_max_queue_wait_seconds=float(
+                env.get("KOTAK_MAX_QUEUE_WAIT_SECONDS", "35.0")
+            ),
+            kotak_chain_strike_count=max(1, int(env.get("KOTAK_CHAIN_STRIKE_COUNT", "40"))),
+            kotak_quotes_batch_size=max(1, min(50, int(env.get("KOTAK_QUOTES_BATCH_SIZE", "2")))),
+            kotak_max_depth_tokens_per_expiry=max(
+                4, int(env.get("KOTAK_MAX_DEPTH_TOKENS_PER_EXPIRY", "12"))
+            ),
             max_quote_staleness_seconds=int(env.get("MAX_QUOTE_STALENESS_SECONDS", "180")),
             kotak_api_root=env.get("KOTAK_API_ROOT", "").strip(),
             risk_free_rate_annual=float(env.get("RISK_FREE_RATE_ANNUAL", "0.0675")),
@@ -180,6 +200,7 @@ class AnalystConfig:
             holidays_file_path=env.get("NIFTY_ANALYST_HOLIDAYS_PATH", "").strip(),
             eod_archive_path=env.get("NIFTY_ANALYST_EOD_ARCHIVE_PATH", "").strip(),
             events_file_path=env.get("NIFTY_ANALYST_EVENTS_PATH", "").strip(),
+            open_positions_file=env.get("NIFTY_OPEN_POSITIONS_FILE", "").strip(),
             payoff_chart_dir=env.get("NIFTY_ANALYST_PAYOFF_CHART_DIR", "").strip(),
             cache_dir=env.get("NIFTY_ANALYST_CACHE_DIR", default_cache),
             audit_log_path=env.get("NIFTY_ANALYST_AUDIT_LOG_PATH", default_audit),

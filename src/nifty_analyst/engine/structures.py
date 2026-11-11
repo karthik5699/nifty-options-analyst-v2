@@ -84,9 +84,19 @@ def build_option_leg(
     """Build a priced OptionLeg with IV at bid/mid/ask, analytical Greeks, and side-aware liquidity score."""
     depth = quote.depth_lots_for(option_type, side)
     if option_type == "CE":
+        if not quote.has_executable_call or quote.call_bid is None or quote.call_ask is None:
+            raise ValueError(
+                f"Cannot build OptionLeg from unpriced/non-executable CE quote at strike {quote.strike} "
+                f"(bid={quote.call_bid}, ask={quote.call_ask})."
+            )
         bid, ask = quote.call_bid, quote.call_ask
         oi, vol = quote.call_oi, quote.call_volume
     else:
+        if not quote.has_executable_put or quote.put_bid is None or quote.put_ask is None:
+            raise ValueError(
+                f"Cannot build OptionLeg from unpriced/non-executable PE quote at strike {quote.strike} "
+                f"(bid={quote.put_bid}, ask={quote.put_ask})."
+            )
         bid, ask = quote.put_bid, quote.put_ask
         oi, vol = quote.put_oi, quote.put_volume
 
@@ -152,25 +162,27 @@ def compute_skew_and_curvature(
     best_call_diff = 999.0
 
     for q in quotes:
-        c_iv = solve_iv_black76(
-            q.call_mid, implied_forward, q.strike, time_to_expiry_years, risk_free_rate, "CE"
-        )
-        c_g = black76_greeks(
-            implied_forward, q.strike, time_to_expiry_years, risk_free_rate, c_iv, "CE"
-        )
-        if abs(c_g.delta - 0.25) < best_call_diff:
-            best_call_diff = abs(c_g.delta - 0.25)
-            best_call_25d_iv = c_iv
+        if q.has_executable_call and q.call_mid is not None:
+            c_iv = solve_iv_black76(
+                q.call_mid, implied_forward, q.strike, time_to_expiry_years, risk_free_rate, "CE"
+            )
+            c_g = black76_greeks(
+                implied_forward, q.strike, time_to_expiry_years, risk_free_rate, c_iv, "CE"
+            )
+            if abs(c_g.delta - 0.25) < best_call_diff:
+                best_call_diff = abs(c_g.delta - 0.25)
+                best_call_25d_iv = c_iv
 
-        p_iv = solve_iv_black76(
-            q.put_mid, implied_forward, q.strike, time_to_expiry_years, risk_free_rate, "PE"
-        )
-        p_g = black76_greeks(
-            implied_forward, q.strike, time_to_expiry_years, risk_free_rate, p_iv, "PE"
-        )
-        if abs(abs(p_g.delta) - 0.25) < best_put_diff:
-            best_put_diff = abs(abs(p_g.delta) - 0.25)
-            best_put_25d_iv = p_iv
+        if q.has_executable_put and q.put_mid is not None:
+            p_iv = solve_iv_black76(
+                q.put_mid, implied_forward, q.strike, time_to_expiry_years, risk_free_rate, "PE"
+            )
+            p_g = black76_greeks(
+                implied_forward, q.strike, time_to_expiry_years, risk_free_rate, p_iv, "PE"
+            )
+            if abs(abs(p_g.delta) - 0.25) < best_put_diff:
+                best_put_diff = abs(abs(p_g.delta) - 0.25)
+                best_put_25d_iv = p_iv
 
     skew_25d = round(best_put_25d_iv - best_call_25d_iv, 6)
     wing_curvature = round(0.5 * (best_put_25d_iv + best_call_25d_iv) - atm_iv, 6)
@@ -847,10 +859,20 @@ def build_candidate_structure(
     )
 
 
-def _find_quote_by_strike(
-    quotes: Sequence[RawStrikeQuote], target_strike: float
-) -> RawStrikeQuote:
-    return min(quotes, key=lambda q: abs(q.strike - target_strike))
+def _find_priced_quote_by_strike(
+    quotes: Sequence[RawStrikeQuote],
+    target_strike: float,
+    option_type: Literal["CE", "PE"] | Literal["BOTH"],
+) -> RawStrikeQuote | None:
+    """Locate the chain strike nearest `target_strike` and return it ONLY if its book is executable."""
+    if not quotes:
+        return None
+    cand = min(quotes, key=lambda q: abs(q.strike - target_strike))
+    if option_type == "CE":
+        return cand if cand.has_executable_call else None
+    if option_type == "PE":
+        return cand if cand.has_executable_put else None
+    return cand if cand.has_both_executable else None
 
 
 def _find_quote_by_target_delta(
@@ -860,11 +882,20 @@ def _find_quote_by_target_delta(
     implied_forward: float,
     time_to_expiry_years: float,
     risk_free_rate: float,
-) -> RawStrikeQuote:
-    best_q = quotes[0]
+) -> RawStrikeQuote | None:
+    priced = [
+        q
+        for q in quotes
+        if (q.has_executable_call if option_type == "CE" else q.has_executable_put)
+    ]
+    if not priced:
+        return None
+    best_q = priced[0]
     best_diff = 999.0
-    for q in quotes:
+    for q in priced:
         mid = q.call_mid if option_type == "CE" else q.put_mid
+        if mid is None:
+            continue
         iv = solve_iv_black76(
             mid, implied_forward, q.strike, time_to_expiry_years, risk_free_rate, option_type
         )
@@ -899,6 +930,7 @@ def generate_candidate_structures(
 
     Generates credit spreads, debit spreads, iron condors, legged condor components,
     iron butterflies, and directional butterflies on equal footing.
+    Strikes with `None` (unpriced/rejected) books are strictly skipped and never zero-filled.
     """
     if len(quotes) < 5:
         return []
@@ -967,267 +999,21 @@ def generate_candidate_structures(
 
     candidates: list[CandidateStructure] = []
 
-    # 1A. BULL PUT SPREAD (Credit, habitual 200-pt wing)
+    # 1A & 1B. BULL PUT SPREAD (Credit, 200-pt & 150-pt wings)
     q_short_put_30 = _find_quote_by_target_delta(
         quotes, "PE", 0.30, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
     )
-    q_long_put_200 = _find_quote_by_strike(quotes, q_short_put_30.strike - 200.0)
-    if q_long_put_200.strike < q_short_put_30.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BPS_{expiry.expiry_date}_{int(q_short_put_30.strike)}_{int(q_long_put_200.strike)}",
-                structure_type="BULL_PUT_SPREAD",
-                direction="BULLISH",
-                legs=[
-                    make_leg(q_short_put_30, "PE", "SHORT", 1),
-                    make_leg(q_long_put_200, "PE", "LONG", 1),
-                ],
-                invalidation_level=bull_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bull_just,
-                matches_part_b_style=True,
-                **common_kwargs,
-            )
-        )
-
-    # 1B. BULL PUT SPREAD (Tighter 150-pt wing)
-    q_long_put_150 = _find_quote_by_strike(quotes, q_short_put_30.strike - 150.0)
-    if (
-        q_long_put_150.strike < q_short_put_30.strike
-        and q_long_put_150.strike != q_long_put_200.strike
-    ):
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BPS_{expiry.expiry_date}_{int(q_short_put_30.strike)}_{int(q_long_put_150.strike)}",
-                structure_type="BULL_PUT_SPREAD",
-                direction="BULLISH",
-                legs=[
-                    make_leg(q_short_put_30, "PE", "SHORT", 1),
-                    make_leg(q_long_put_150, "PE", "LONG", 1),
-                ],
-                invalidation_level=bull_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bull_just,
-                matches_part_b_style=True,
-                **common_kwargs,
-            )
-        )
-
-    # 2. BULL CALL SPREAD (Debit, evaluated on equal footing)
-    q_long_call_45 = _find_quote_by_target_delta(
-        quotes, "CE", 0.45, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-    )
-    q_short_call_up = _find_quote_by_strike(quotes, q_long_call_45.strike + 200.0)
-    if q_short_call_up.strike > q_long_call_45.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BCS_{expiry.expiry_date}_{int(q_long_call_45.strike)}_{int(q_short_call_up.strike)}",
-                structure_type="BULL_CALL_SPREAD",
-                direction="BULLISH",
-                legs=[
-                    make_leg(q_long_call_45, "CE", "LONG", 1),
-                    make_leg(q_short_call_up, "CE", "SHORT", 1),
-                ],
-                invalidation_level=bull_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bull_just,
-                matches_part_b_style=False,
-                **common_kwargs,
-            )
-        )
-
-    # 3. BULLISH CALL BUTTERFLY (1-2-1 Call Butterfly above spot)
-    q_bfly_mid = _find_quote_by_strike(quotes, spot + 150.0)
-    q_bfly_low = _find_quote_by_strike(quotes, q_bfly_mid.strike - 150.0)
-    q_bfly_high = _find_quote_by_strike(quotes, q_bfly_mid.strike + 150.0)
-    if q_bfly_low.strike < q_bfly_mid.strike < q_bfly_high.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BULL_BFLY_{expiry.expiry_date}_{int(q_bfly_low.strike)}_{int(q_bfly_mid.strike)}_{int(q_bfly_high.strike)}",
-                structure_type="BULLISH_BUTTERFLY",
-                direction="BULLISH",
-                legs=[
-                    make_leg(q_bfly_low, "CE", "LONG", 1),
-                    make_leg(q_bfly_mid, "CE", "SHORT", 2),
-                    make_leg(q_bfly_high, "CE", "LONG", 1),
-                ],
-                invalidation_level=bull_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bull_just,
-                matches_part_b_style=False,
-                **common_kwargs,
-            )
-        )
-
-    # 4A. BEAR CALL SPREAD (Credit, 150-pt wing)
-    q_short_call_30 = _find_quote_by_target_delta(
-        quotes, "CE", 0.30, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-    )
-    q_long_call_150 = _find_quote_by_strike(quotes, q_short_call_30.strike + 150.0)
-    if q_long_call_150.strike > q_short_call_30.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BEAR_CS_{expiry.expiry_date}_{int(q_short_call_30.strike)}_{int(q_long_call_150.strike)}",
-                structure_type="BEAR_CALL_SPREAD",
-                direction="BEARISH",
-                legs=[
-                    make_leg(q_short_call_30, "CE", "SHORT", 1),
-                    make_leg(q_long_call_150, "CE", "LONG", 1),
-                ],
-                invalidation_level=bear_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bear_just,
-                matches_part_b_style=True,
-                **common_kwargs,
-            )
-        )
-
-    # 4B. BEAR CALL SPREAD (Habitual 200-pt wing)
-    q_long_call_200 = _find_quote_by_strike(quotes, q_short_call_30.strike + 200.0)
-    if (
-        q_long_call_200.strike > q_short_call_30.strike
-        and q_long_call_200.strike != q_long_call_150.strike
-    ):
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BEAR_CS_{expiry.expiry_date}_{int(q_short_call_30.strike)}_{int(q_long_call_200.strike)}",
-                structure_type="BEAR_CALL_SPREAD",
-                direction="BEARISH",
-                legs=[
-                    make_leg(q_short_call_30, "CE", "SHORT", 1),
-                    make_leg(q_long_call_200, "CE", "LONG", 1),
-                ],
-                invalidation_level=bear_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bear_just,
-                matches_part_b_style=True,
-                **common_kwargs,
-            )
-        )
-
-    # 5. BEAR PUT SPREAD (Debit, evaluated on equal footing)
-    q_long_put_45 = _find_quote_by_target_delta(
-        quotes, "PE", 0.45, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-    )
-    q_short_put_dn = _find_quote_by_strike(quotes, q_long_put_45.strike - 150.0)
-    if q_short_put_dn.strike < q_long_put_45.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BEAR_PS_{expiry.expiry_date}_{int(q_long_put_45.strike)}_{int(q_short_put_dn.strike)}",
-                structure_type="BEAR_PUT_SPREAD",
-                direction="BEARISH",
-                legs=[
-                    make_leg(q_long_put_45, "PE", "LONG", 1),
-                    make_leg(q_short_put_dn, "PE", "SHORT", 1),
-                ],
-                invalidation_level=bear_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bear_just,
-                matches_part_b_style=False,
-                **common_kwargs,
-            )
-        )
-
-    # 6. BEARISH PUT BUTTERFLY (1-2-1 Put Butterfly below spot)
-    q_pbfly_mid = _find_quote_by_strike(quotes, spot - 150.0)
-    q_pbfly_low = _find_quote_by_strike(quotes, q_pbfly_mid.strike - 150.0)
-    q_pbfly_high = _find_quote_by_strike(quotes, q_pbfly_mid.strike + 150.0)
-    if q_pbfly_low.strike < q_pbfly_mid.strike < q_pbfly_high.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=f"BEAR_BFLY_{expiry.expiry_date}_{int(q_pbfly_low.strike)}_{int(q_pbfly_mid.strike)}_{int(q_pbfly_high.strike)}",
-                structure_type="BEARISH_BUTTERFLY",
-                direction="BEARISH",
-                legs=[
-                    make_leg(q_pbfly_high, "PE", "LONG", 1),
-                    make_leg(q_pbfly_mid, "PE", "SHORT", 2),
-                    make_leg(q_pbfly_low, "PE", "LONG", 1),
-                ],
-                invalidation_level=bear_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=bear_just,
-                matches_part_b_style=False,
-                **common_kwargs,
-            )
-        )
-
-    # 7. IRON CONDOR (Neutral: ~0.16 delta shorts per side, 150-pt wings)
-    q_ic_short_put = _find_quote_by_target_delta(
-        quotes, "PE", 0.16, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-    )
-    q_ic_long_put = _find_quote_by_strike(quotes, q_ic_short_put.strike - 150.0)
-    q_ic_short_call = _find_quote_by_target_delta(
-        quotes, "CE", 0.16, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-    )
-    q_ic_long_call = _find_quote_by_strike(quotes, q_ic_short_call.strike + 150.0)
-    if (
-        q_ic_long_put.strike < q_ic_short_put.strike < q_ic_short_call.strike < q_ic_long_call.strike
-    ):
-        candidates.append(
-            build_candidate_structure(
-                structure_id=(
-                    f"IC_{expiry.expiry_date}_{int(q_ic_long_put.strike)}_"
-                    f"{int(q_ic_short_put.strike)}_{int(q_ic_short_call.strike)}_{int(q_ic_long_call.strike)}"
-                ),
-                structure_type="IRON_CONDOR",
-                direction="NEUTRAL",
-                legs=[
-                    make_leg(q_ic_long_put, "PE", "LONG", 1),
-                    make_leg(q_ic_short_put, "PE", "SHORT", 1),
-                    make_leg(q_ic_short_call, "CE", "SHORT", 1),
-                    make_leg(q_ic_long_call, "CE", "LONG", 1),
-                ],
-                invalidation_level=neut_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=neut_just,
-                matches_part_b_style=True,
-                **common_kwargs,
-            )
-        )
-
-    # 8. IRON BUTTERFLY (Neutral high-theta pin around synthetic forward, 150-pt wings)
-    q_ib_atm = _find_quote_by_strike(quotes, implied_forward)
-    q_ib_low_put = _find_quote_by_strike(quotes, q_ib_atm.strike - 150.0)
-    q_ib_high_call = _find_quote_by_strike(quotes, q_ib_atm.strike + 150.0)
-    if q_ib_low_put.strike < q_ib_atm.strike < q_ib_high_call.strike:
-        candidates.append(
-            build_candidate_structure(
-                structure_id=(
-                    f"IBFLY_{expiry.expiry_date}_{int(q_ib_low_put.strike)}_"
-                    f"{int(q_ib_atm.strike)}_{int(q_ib_high_call.strike)}"
-                ),
-                structure_type="IRON_BUTTERFLY",
-                direction="NEUTRAL",
-                legs=[
-                    make_leg(q_ib_low_put, "PE", "LONG", 1),
-                    make_leg(q_ib_atm, "PE", "SHORT", 1),
-                    make_leg(q_ib_atm, "CE", "SHORT", 1),
-                    make_leg(q_ib_high_call, "CE", "LONG", 1),
-                ],
-                invalidation_level=neut_inv,
-                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
-                invalidation_justification=neut_just,
-                matches_part_b_style=False,
-                **common_kwargs,
-            )
-        )
-
-    # 9. LEGGED IRON CONDOR COMPONENT (OI-wall-anchored ~0.20 delta wing vertical)
-    legging_bull = price_structure.trend_1d_state != "DOWNTREND"
-    if legging_bull:
-        q_leg_sp = _find_quote_by_target_delta(
-            quotes, "PE", 0.20, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-        )
-        q_leg_lp = _find_quote_by_strike(quotes, q_leg_sp.strike - 150.0)
-        if q_leg_lp.strike < q_leg_sp.strike:
+    if q_short_put_30 is not None:
+        q_long_put_200 = _find_priced_quote_by_strike(quotes, q_short_put_30.strike - 200.0, "PE")
+        if q_long_put_200 is not None and q_long_put_200.strike < q_short_put_30.strike:
             candidates.append(
                 build_candidate_structure(
-                    structure_id=f"LEG_IC_PE_{expiry.expiry_date}_{int(q_leg_sp.strike)}_{int(q_leg_lp.strike)}",
-                    structure_type="LEGGED_IRON_CONDOR_COMPONENT",
+                    structure_id=f"BPS_{expiry.expiry_date}_{int(q_short_put_30.strike)}_{int(q_long_put_200.strike)}",
+                    structure_type="BULL_PUT_SPREAD",
                     direction="BULLISH",
                     legs=[
-                        make_leg(q_leg_sp, "PE", "SHORT", 1),
-                        make_leg(q_leg_lp, "PE", "LONG", 1),
+                        make_leg(q_short_put_30, "PE", "SHORT", 1),
+                        make_leg(q_long_put_200, "PE", "LONG", 1),
                     ],
                     invalidation_level=bull_inv,
                     invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
@@ -1236,20 +1022,99 @@ def generate_candidate_structures(
                     **common_kwargs,
                 )
             )
-    else:
-        q_leg_sc = _find_quote_by_target_delta(
-            quotes, "CE", 0.20, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
-        )
-        q_leg_lc = _find_quote_by_strike(quotes, q_leg_sc.strike + 150.0)
-        if q_leg_lc.strike > q_leg_sc.strike:
+
+        q_long_put_150 = _find_priced_quote_by_strike(quotes, q_short_put_30.strike - 150.0, "PE")
+        if (
+            q_long_put_150 is not None
+            and q_long_put_150.strike < q_short_put_30.strike
+            and (q_long_put_200 is None or q_long_put_150.strike != q_long_put_200.strike)
+        ):
             candidates.append(
                 build_candidate_structure(
-                    structure_id=f"LEG_IC_CE_{expiry.expiry_date}_{int(q_leg_sc.strike)}_{int(q_leg_lc.strike)}",
-                    structure_type="LEGGED_IRON_CONDOR_COMPONENT",
+                    structure_id=f"BPS_{expiry.expiry_date}_{int(q_short_put_30.strike)}_{int(q_long_put_150.strike)}",
+                    structure_type="BULL_PUT_SPREAD",
+                    direction="BULLISH",
+                    legs=[
+                        make_leg(q_short_put_30, "PE", "SHORT", 1),
+                        make_leg(q_long_put_150, "PE", "LONG", 1),
+                    ],
+                    invalidation_level=bull_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bull_just,
+                    matches_part_b_style=True,
+                    **common_kwargs,
+                )
+            )
+
+    # 2. BULL CALL SPREAD (Debit, evaluated on equal footing)
+    q_long_call_45 = _find_quote_by_target_delta(
+        quotes, "CE", 0.45, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+    )
+    if q_long_call_45 is not None:
+        q_short_call_up = _find_priced_quote_by_strike(
+            quotes, q_long_call_45.strike + 200.0, "CE"
+        ) or _find_priced_quote_by_strike(quotes, q_long_call_45.strike + 150.0, "CE")
+        if q_short_call_up is not None and q_short_call_up.strike > q_long_call_45.strike:
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BCS_{expiry.expiry_date}_{int(q_long_call_45.strike)}_{int(q_short_call_up.strike)}",
+                    structure_type="BULL_CALL_SPREAD",
+                    direction="BULLISH",
+                    legs=[
+                        make_leg(q_long_call_45, "CE", "LONG", 1),
+                        make_leg(q_short_call_up, "CE", "SHORT", 1),
+                    ],
+                    invalidation_level=bull_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bull_just,
+                    matches_part_b_style=False,
+                    **common_kwargs,
+                )
+            )
+
+    # 3. BULLISH CALL BUTTERFLY (1-2-1 Call Butterfly above spot)
+    q_bfly_mid = _find_priced_quote_by_strike(quotes, spot + 150.0, "CE")
+    if q_bfly_mid is not None:
+        q_bfly_low = _find_priced_quote_by_strike(quotes, q_bfly_mid.strike - 150.0, "CE")
+        q_bfly_high = _find_priced_quote_by_strike(quotes, q_bfly_mid.strike + 150.0, "CE")
+        if (
+            q_bfly_low is not None
+            and q_bfly_high is not None
+            and q_bfly_low.strike < q_bfly_mid.strike < q_bfly_high.strike
+        ):
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BULL_BFLY_{expiry.expiry_date}_{int(q_bfly_low.strike)}_{int(q_bfly_mid.strike)}_{int(q_bfly_high.strike)}",
+                    structure_type="BULLISH_BUTTERFLY",
+                    direction="BULLISH",
+                    legs=[
+                        make_leg(q_bfly_low, "CE", "LONG", 1),
+                        make_leg(q_bfly_mid, "CE", "SHORT", 2),
+                        make_leg(q_bfly_high, "CE", "LONG", 1),
+                    ],
+                    invalidation_level=bull_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bull_just,
+                    matches_part_b_style=False,
+                    **common_kwargs,
+                )
+            )
+
+    # 4A & 4B. BEAR CALL SPREAD (Credit, 150-pt & 200-pt wings)
+    q_short_call_30 = _find_quote_by_target_delta(
+        quotes, "CE", 0.30, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+    )
+    if q_short_call_30 is not None:
+        q_long_call_150 = _find_priced_quote_by_strike(quotes, q_short_call_30.strike + 150.0, "CE")
+        if q_long_call_150 is not None and q_long_call_150.strike > q_short_call_30.strike:
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BEAR_CS_{expiry.expiry_date}_{int(q_short_call_30.strike)}_{int(q_long_call_150.strike)}",
+                    structure_type="BEAR_CALL_SPREAD",
                     direction="BEARISH",
                     legs=[
-                        make_leg(q_leg_sc, "CE", "SHORT", 1),
-                        make_leg(q_leg_lc, "CE", "LONG", 1),
+                        make_leg(q_short_call_30, "CE", "SHORT", 1),
+                        make_leg(q_long_call_150, "CE", "LONG", 1),
                     ],
                     invalidation_level=bear_inv,
                     invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
@@ -1258,5 +1123,198 @@ def generate_candidate_structures(
                     **common_kwargs,
                 )
             )
+
+        q_long_call_200 = _find_priced_quote_by_strike(quotes, q_short_call_30.strike + 200.0, "CE")
+        if (
+            q_long_call_200 is not None
+            and q_long_call_200.strike > q_short_call_30.strike
+            and (q_long_call_150 is None or q_long_call_200.strike != q_long_call_150.strike)
+        ):
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BEAR_CS_{expiry.expiry_date}_{int(q_short_call_30.strike)}_{int(q_long_call_200.strike)}",
+                    structure_type="BEAR_CALL_SPREAD",
+                    direction="BEARISH",
+                    legs=[
+                        make_leg(q_short_call_30, "CE", "SHORT", 1),
+                        make_leg(q_long_call_200, "CE", "LONG", 1),
+                    ],
+                    invalidation_level=bear_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bear_just,
+                    matches_part_b_style=True,
+                    **common_kwargs,
+                )
+            )
+
+    # 5. BEAR PUT SPREAD (Debit, evaluated on equal footing)
+    q_long_put_45 = _find_quote_by_target_delta(
+        quotes, "PE", 0.45, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+    )
+    if q_long_put_45 is not None:
+        q_short_put_dn = _find_priced_quote_by_strike(quotes, q_long_put_45.strike - 150.0, "PE")
+        if q_short_put_dn is not None and q_short_put_dn.strike < q_long_put_45.strike:
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BEAR_PS_{expiry.expiry_date}_{int(q_long_put_45.strike)}_{int(q_short_put_dn.strike)}",
+                    structure_type="BEAR_PUT_SPREAD",
+                    direction="BEARISH",
+                    legs=[
+                        make_leg(q_long_put_45, "PE", "LONG", 1),
+                        make_leg(q_short_put_dn, "PE", "SHORT", 1),
+                    ],
+                    invalidation_level=bear_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bear_just,
+                    matches_part_b_style=False,
+                    **common_kwargs,
+                )
+            )
+
+    # 6. BEARISH PUT BUTTERFLY (1-2-1 Put Butterfly below spot)
+    q_pbfly_mid = _find_priced_quote_by_strike(quotes, spot - 150.0, "PE")
+    if q_pbfly_mid is not None:
+        q_pbfly_low = _find_priced_quote_by_strike(quotes, q_pbfly_mid.strike - 150.0, "PE")
+        q_pbfly_high = _find_priced_quote_by_strike(quotes, q_pbfly_mid.strike + 150.0, "PE")
+        if (
+            q_pbfly_low is not None
+            and q_pbfly_high is not None
+            and q_pbfly_low.strike < q_pbfly_mid.strike < q_pbfly_high.strike
+        ):
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=f"BEAR_BFLY_{expiry.expiry_date}_{int(q_pbfly_low.strike)}_{int(q_pbfly_mid.strike)}_{int(q_pbfly_high.strike)}",
+                    structure_type="BEARISH_BUTTERFLY",
+                    direction="BEARISH",
+                    legs=[
+                        make_leg(q_pbfly_high, "PE", "LONG", 1),
+                        make_leg(q_pbfly_mid, "PE", "SHORT", 2),
+                        make_leg(q_pbfly_low, "PE", "LONG", 1),
+                    ],
+                    invalidation_level=bear_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=bear_just,
+                    matches_part_b_style=False,
+                    **common_kwargs,
+                )
+            )
+
+    # 7. IRON CONDOR (Neutral: ~0.16 delta shorts per side, 150-pt wings)
+    q_ic_short_put = _find_quote_by_target_delta(
+        quotes, "PE", 0.16, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+    )
+    q_ic_short_call = _find_quote_by_target_delta(
+        quotes, "CE", 0.16, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+    )
+    if q_ic_short_put is not None and q_ic_short_call is not None:
+        q_ic_long_put = _find_priced_quote_by_strike(quotes, q_ic_short_put.strike - 150.0, "PE")
+        q_ic_long_call = _find_priced_quote_by_strike(quotes, q_ic_short_call.strike + 150.0, "CE")
+        if (
+            q_ic_long_put is not None
+            and q_ic_long_call is not None
+            and q_ic_long_put.strike < q_ic_short_put.strike < q_ic_short_call.strike < q_ic_long_call.strike
+        ):
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=(
+                        f"IC_{expiry.expiry_date}_{int(q_ic_long_put.strike)}_"
+                        f"{int(q_ic_short_put.strike)}_{int(q_ic_short_call.strike)}_{int(q_ic_long_call.strike)}"
+                    ),
+                    structure_type="IRON_CONDOR",
+                    direction="NEUTRAL",
+                    legs=[
+                        make_leg(q_ic_long_put, "PE", "LONG", 1),
+                        make_leg(q_ic_short_put, "PE", "SHORT", 1),
+                        make_leg(q_ic_short_call, "CE", "SHORT", 1),
+                        make_leg(q_ic_long_call, "CE", "LONG", 1),
+                    ],
+                    invalidation_level=neut_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=neut_just,
+                    matches_part_b_style=True,
+                    **common_kwargs,
+                )
+            )
+
+    # 8. IRON BUTTERFLY (Neutral high-theta pin around synthetic forward, 150-pt wings)
+    q_ib_atm = _find_priced_quote_by_strike(quotes, implied_forward, "BOTH")
+    if q_ib_atm is not None:
+        q_ib_low_put = _find_priced_quote_by_strike(quotes, q_ib_atm.strike - 150.0, "PE")
+        q_ib_high_call = _find_priced_quote_by_strike(quotes, q_ib_atm.strike + 150.0, "CE")
+        if (
+            q_ib_low_put is not None
+            and q_ib_high_call is not None
+            and q_ib_low_put.strike < q_ib_atm.strike < q_ib_high_call.strike
+        ):
+            candidates.append(
+                build_candidate_structure(
+                    structure_id=(
+                        f"IBFLY_{expiry.expiry_date}_{int(q_ib_low_put.strike)}_"
+                        f"{int(q_ib_atm.strike)}_{int(q_ib_high_call.strike)}"
+                    ),
+                    structure_type="IRON_BUTTERFLY",
+                    direction="NEUTRAL",
+                    legs=[
+                        make_leg(q_ib_low_put, "PE", "LONG", 1),
+                        make_leg(q_ib_atm, "PE", "SHORT", 1),
+                        make_leg(q_ib_atm, "CE", "SHORT", 1),
+                        make_leg(q_ib_high_call, "CE", "LONG", 1),
+                    ],
+                    invalidation_level=neut_inv,
+                    invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                    invalidation_justification=neut_just,
+                    matches_part_b_style=False,
+                    **common_kwargs,
+                )
+            )
+
+    # 9. LEGGED IRON CONDOR COMPONENT (OI-wall-anchored ~0.20 delta wing vertical)
+    legging_bull = price_structure.trend_1d_state != "DOWNTREND"
+    if legging_bull:
+        q_leg_sp = _find_quote_by_target_delta(
+            quotes, "PE", 0.20, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+        )
+        if q_leg_sp is not None:
+            q_leg_lp = _find_priced_quote_by_strike(quotes, q_leg_sp.strike - 150.0, "PE")
+            if q_leg_lp is not None and q_leg_lp.strike < q_leg_sp.strike:
+                candidates.append(
+                    build_candidate_structure(
+                        structure_id=f"LEG_IC_PE_{expiry.expiry_date}_{int(q_leg_sp.strike)}_{int(q_leg_lp.strike)}",
+                        structure_type="LEGGED_IRON_CONDOR_COMPONENT",
+                        direction="BULLISH",
+                        legs=[
+                            make_leg(q_leg_sp, "PE", "SHORT", 1),
+                            make_leg(q_leg_lp, "PE", "LONG", 1),
+                        ],
+                        invalidation_level=bull_inv,
+                        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                        invalidation_justification=bull_just,
+                        matches_part_b_style=True,
+                        **common_kwargs,
+                    )
+                )
+    else:
+        q_leg_sc = _find_quote_by_target_delta(
+            quotes, "CE", 0.20, implied_forward, time_to_expiry_years, config.risk_free_rate_annual
+        )
+        if q_leg_sc is not None:
+            q_leg_lc = _find_priced_quote_by_strike(quotes, q_leg_sc.strike + 150.0, "CE")
+            if q_leg_lc is not None and q_leg_lc.strike > q_leg_sc.strike:
+                candidates.append(
+                    build_candidate_structure(
+                        structure_id=f"LEG_IC_CE_{expiry.expiry_date}_{int(q_leg_sc.strike)}_{int(q_leg_lc.strike)}",
+                        structure_type="LEGGED_IRON_CONDOR_COMPONENT",
+                        direction="BEARISH",
+                        legs=[
+                            make_leg(q_leg_sc, "CE", "SHORT", 1),
+                            make_leg(q_leg_lc, "CE", "LONG", 1),
+                        ],
+                        invalidation_level=bear_inv,
+                        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                        invalidation_justification=bear_just,
+                        matches_part_b_style=True,
+                        **common_kwargs,
+                    )
+                )
 
     return candidates

@@ -4,7 +4,7 @@
 **Target Audience**: Instinct (running baseline maintainer) & Karthik  
 **Scope**: Technical cross-check of Instinct’s 11 Nov 2026 review against `karthik5699/nifty-options-analyst-v2` (`4bd1a49`) and `karthik5699/Kotak_API` (`option_chain.py`), plus three architectural merge guards required whether executing **Path B** (porting `v2` modules into the running baseline) or **Path A / Path C** (bringing baseline live adapters + operational runners into `v2`).
 
-> **Status Notice**: `v2` remains an offline-verified research build (`40/40` test suites passing). Do **not** switch live broker runs directly onto unmodified `v2` until the live adapter & open-positions merges below are completed and verified under supervised read-only checks.
+> **Implementation Status (Updated 11 Nov 2026)**: All items in this plan (`P1-1`, `P1-2`, `P1-3`, `P2-1`, `P2-2`, `P3.1–P3.5`), all three architectural merge guards, and the full offline contract/regression suite (`tests/test_instinct_review_fixes.py` + `tests/test_live_adapter_contract.py`, **`48/48` suites / `71` checks passing**) are now implemented in `src/nifty_analyst/` (`adapters/request_safety.py`, `adapters/open_positions.py`, `adapters/kotak_neo.py`, `operations/decision_driver.py`, `operations/live_verify.py`, `engine/pricing.py`, `engine/structures.py`, `engine/part_a_gatekeeper.py`, `pipeline.py`, and `cli.py`). Supervised live gating (`FETCH_TIME_NOT_EXCHANGE` -> `is_live_ready == False`) remains strictly enforced until Section 7 live checks are completed.
 
 ---
 
