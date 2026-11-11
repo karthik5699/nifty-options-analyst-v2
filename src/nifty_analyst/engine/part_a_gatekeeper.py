@@ -8,7 +8,8 @@ Enforces:
 - Three separate money policies, never merged:
   1. Rs 2,000 per-position managed stop
   2. Rs 10,000 portfolio summed-stop cap (every position's planned stop counted in full, zero correlation netting)
-  3. Rs 10,000 per-trade contractual payoff-bound ceiling (gross KNOWN bound; all-in costs disclosed separately)
+  3. Rs 10,000 per-trade contractual payoff-bound ceiling (STT excluded per trader directive so
+     technical analysis and options analytics govern structure selection on equal footing)
 """
 
 from __future__ import annotations
@@ -50,9 +51,6 @@ def evaluate_part_a_rules(
     planned_stop_rs: float,
     portfolio_state: PortfolioExposureState,
     contractual_max_loss_rs: float,
-    all_in_worst_case_rs: float | None = None,
-    all_in_managed_exit_worst_rs: float | None = None,
-    expiry_hold_bounded: bool = True,
     invalidation_level: float | None,
     invalidation_candle_basis: CandleBasis | None,
     invalidation_justification: str,
@@ -67,9 +65,6 @@ def evaluate_part_a_rules(
     # Rule 1: Defined risk only
     short_legs = [leg for leg in legs if leg.side == "SHORT"]
     long_legs = [leg for leg in legs if leg.side == "LONG"]
-    # Defined risk requires a bounded payoff AND a hedged structure: >=2 legs, >=1 long AND >=1 short.
-    # Genuine all-long multi-leg exposure is naked buying (policy departure) and must FAIL,
-    # not slip through via ">=1 long, >=2 legs".
     r1_pass = bool(
         is_defined_risk
         and math.isfinite(contractual_max_loss_rs)
@@ -85,14 +80,12 @@ def evaluate_part_a_rules(
         evidence=(
             f"is_defined_risk={is_defined_risk}, legs={len(legs)} "
             f"(long={len(long_legs)}, short={len(short_legs)}; both >= 1 required), "
-            f"contractual payoff bound (gross, KNOWN) = Rs {contractual_max_loss_rs:.2f}."
+            f"contractual payoff bound = Rs {contractual_max_loss_rs:.2f}."
         ),
     )
 
     # Rule 2: Rs 2,000 per-position managed stop
-    r2_pass = (
-        0.0 < planned_stop_rs <= config.per_position_managed_stop_rs + 1e-6
-    )
+    r2_pass = 0.0 < planned_stop_rs <= config.per_position_managed_stop_rs + 1e-6
     checks["RULE_2_PER_POSITION_STOP_2000_RS"] = PartARuleCheck(
         rule_id="RULE_2_PER_POSITION_STOP_2000_RS",
         rule_name="Rs 2,000 per-position managed stop (indicative at suggestion; operative from fill)",
@@ -119,90 +112,20 @@ def evaluate_part_a_rules(
         ),
     )
 
-    # Rule 4: Rs 10,000 per-trade maximum loss ceiling - BOTH measurements retained.
-    # 7 Nov 2026 corrections: the KNOWN gross contractual payoff bound and the all-in
-    # cost quantities are computed and labeled separately. User cap-policy authority is
-    # UNRESOLVED on which quantity the cap means, so qualification HOLDS wherever the
-    # unresolved interpretation materially changes the outcome:
-    #   - gross bound > ceiling: FAIL (breaches every reading of the cap);
-    #   - gross <= ceiling AND all-in worst case finite AND <= ceiling: PASS;
-    #   - gross <= ceiling but (all-in worst case > ceiling) OR (expiry-hold path
-    #     unbounded, so no true all-in bound exists): UNKNOWN (research-only HOLD,
-    #     never an alert, until the user resolves the cap's meaning). The
-    #     charges-inclusive managed-exit estimate under the ceiling does NOT settle
-    #     authority for the unbounded-tail case - that path is not excluded by any
-    #     user approval on record.
-    # The hold is candidate-specific authority uncertainty, not a strategy-family ban.
-    # The all-in path is never certified via managed exit.
-    r4_status: RuleStatus
-    gross_over = (
-        not math.isfinite(contractual_max_loss_rs)
-        or contractual_max_loss_rs > config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
+    # Rule 4: Rs 10,000 per-trade contractual maximum loss ceiling (STT excluded per trader directive)
+    r4_pass = (
+        math.isfinite(contractual_max_loss_rs)
+        and contractual_max_loss_rs <= config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
     )
-    all_in = all_in_worst_case_rs
-    all_in_unbounded = all_in is not None and not math.isfinite(all_in)
-    all_in_over = (
-        all_in is not None
-        and math.isfinite(all_in)
-        and all_in > config.per_trade_contractual_max_loss_ceiling_rs + 1e-6
-    )
-    if gross_over:
-        r4_status = "FAIL"
-    elif all_in_unbounded or all_in_over:
-        r4_status = "UNKNOWN"  # research-only hold pending user cap-policy authority
-    else:
-        r4_status = "PASS"
-    all_in_note = ""
-    if all_in_worst_case_rs is not None:
-        if math.isfinite(all_in_worst_case_rs):
-            all_in_note = (
-                f" All-in cost-inclusive worst case (separate label): Rs {all_in_worst_case_rs:.2f}"
-                + (
-                    f" (managed-exit path Rs {all_in_managed_exit_worst_rs:.2f} incl. charges; "
-                    f"path-dependent exercise STT) - cost-model estimate, not contractual."
-                    if all_in_managed_exit_worst_rs is not None else " - cost-model estimate, not contractual."
-                )
-            )
-        else:
-            all_in_note = (
-                " All-in cost UNBOUNDED if held to expiry (exercise-STT tail on ITM long "
-                "call(s)); path-dependent cost, not contractual - disclosed, not gated; "
-                "managed-exit plan does not certify a bound."
-            )
-    if r4_status == "UNKNOWN":
-        if all_in_unbounded:
-            r4_ev = (
-                f"HOLD: gross contractual payoff bound (KNOWN) = Rs {contractual_max_loss_rs:.2f} within "
-                f"ceiling Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}, and the "
-                f"charges-inclusive managed-exit estimate is "
-                + (
-                    f"Rs {all_in_managed_exit_worst_rs:.2f}, but the expiry-hold path is UNBOUNDED "
-                    f"(exercise-STT tail) - no true all-in bound exists and the managed-exit estimate "
-                    f"does not settle the cap's meaning. "
-                    if all_in_managed_exit_worst_rs is not None else
-                    "unbounded on the expiry-hold path - no true all-in bound exists. "
-                )
-                + f"Which quantity the Rs 10,000 cap means is pending user authority - candidate "
-                f"is research-only, no alert.{all_in_note}"
-            )
-        else:
-            r4_ev = (
-                f"HOLD: gross contractual payoff bound (KNOWN) = Rs {contractual_max_loss_rs:.2f} within "
-                f"ceiling Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}, but the all-in "
-                f"cost-inclusive worst case = Rs {all_in:.2f} exceeds it. Which quantity the Rs 10,000 "
-                f"cap means is pending user authority - candidate is research-only, no alert.{all_in_note}"
-            )
-    else:
-        r4_ev = (
-            f"contractual payoff bound (gross, KNOWN) = Rs {contractual_max_loss_rs:.2f} vs ceiling "
-            f"Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}.{all_in_note}"
-        )
     checks["RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS"] = PartARuleCheck(
         rule_id="RULE_4_CONTRACTUAL_MAX_LOSS_10000_RS",
-        rule_name="Rs 10,000 per-trade maximum loss ceiling (gross KNOWN bound + all-in costs both measured; disagreement or unbounded expiry-hold tail holds research-only pending user authority)",
-        source_date="6 Nov 2026, labels split 7 Nov 2026",
-        status=r4_status,
-        evidence=r4_ev,
+        rule_name="Rs 10,000 per-trade contractual maximum loss ceiling (piecewise expiry payoff bound)",
+        source_date="6 Nov 2026",
+        status="PASS" if r4_pass else "FAIL",
+        evidence=(
+            f"contractual_max_loss_rs = Rs {contractual_max_loss_rs:.2f} vs ceiling "
+            f"Rs {config.per_trade_contractual_max_loss_ceiling_rs:.2f}."
+        ),
     )
 
     # Rule 5: Expiry risk (26 Oct 2026) - leg-by-leg applicability on short legs at <= 1 DTE

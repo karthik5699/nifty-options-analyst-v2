@@ -1,32 +1,74 @@
 #!/usr/bin/env python3
-"""Regression: exact NIFTY symbol filter (BANKNIFTY leak corrupted futures CSV, 6 Nov 2026)."""
-import csv, sys
+"""Regression: exact NIFTY symbol filter (guards against BANKNIFTY/FINNIFTY substring leak)."""
 
-def test_fetcher_filter_source():
-    src = open('/home/sandbox/nifty-analyst/iv_history/fetch_futures.py').read()
-    assert "r.get('TckrSymb') == 'NIFTY'" in src, 'futures fetcher must use exact == NIFTY'
-    assert "'NIFTY' in str(" not in src, 'substring match leaked BANKNIFTY (root cause 6 Nov)'
-    opt = open('/home/sandbox/nifty-analyst/iv_history/fetch.py').read()
-    assert "row['TckrSymb'] == 'NIFTY'" in opt
+from __future__ import annotations
 
-def test_futures_data_ranges():
-    with open('/home/sandbox/nifty-analyst/iv_history/nifty_fut_daily.csv') as f:
-        rows = list(csv.reader(f))
-    assert rows, 'no futures data'
-    for r in rows:
-        px = float(r[3] or r[2])
-        und = float(r[4])
-        assert 15000 < px < 35000, f'futures price out of NIFTY range: {r}'
-        assert 15000 < und < 35000, f'underlying out of NIFTY range: {r}'
-        assert abs(px - und) / und < 0.06, f'basis >6% implausible: {r}'
+import inspect
+from pathlib import Path
 
-def test_options_underlying_range():
-    with open('/home/sandbox/nifty-analyst/iv_history/nifty_ido_daily.csv') as f:
-        for r in csv.DictReader(f):
-            if r['UndrlygPric']:
-                u = float(r['UndrlygPric'])
-                assert 15000 < u < 35000, f'options underlying out of range: {u}'
+import pytest
 
-if __name__ == '__main__':
-    test_fetcher_filter_source(); test_futures_data_ranges(); test_options_underlying_range()
-    print('symbol filter regression tests PASS')
+from nifty_analyst.adapters import iv_history_builder
+from nifty_analyst.adapters.iv_history_builder import (
+    filter_exact_nifty_udiff_rows,
+    validate_nifty_futures_row,
+    validate_nifty_options_row,
+)
+
+
+def test_fetcher_filter_source() -> None:
+    """Verify `iv_history_builder` uses exact `== 'NIFTY'` equality and never substring `in`."""
+    src = inspect.getsource(iv_history_builder.filter_exact_nifty_udiff_rows)
+    assert 'row.get("TckrSymb") == "NIFTY"' in src
+    assert '"NIFTY" in' not in src and "'NIFTY' in" not in src
+
+    mixed_rows = [
+        {"TckrSymb": "NIFTY", "FinInstrmTp": "IDF", "SttlmPric": "24210.5", "UndrlygPric": "24180.5"},
+        {"TckrSymb": "BANKNIFTY", "FinInstrmTp": "IDF", "SttlmPric": "51850.0", "UndrlygPric": "51700.0"},
+        {"TckrSymb": "FINNIFTY", "FinInstrmTp": "IDO", "SttlmPric": "120.0", "UndrlygPric": "23900.0"},
+        {"TckrSymb": "MIDCPNIFTY", "FinInstrmTp": "IDO", "SttlmPric": "85.0", "UndrlygPric": "12400.0"},
+    ]
+    filtered = filter_exact_nifty_udiff_rows(mixed_rows)
+    assert len(filtered) == 1
+    assert filtered[0]["TckrSymb"] == "NIFTY"
+
+
+def test_futures_data_ranges() -> None:
+    """Verify valid NIFTY futures rows pass and out-of-range / BANKNIFTY / >6% basis rows fail."""
+    px, und = validate_nifty_futures_row(
+        {"TckrSymb": "NIFTY", "SttlmPric": "24235.0", "UndrlygPric": "24180.5"}
+    )
+    assert 15000 < px < 35000
+    assert 15000 < und < 35000
+    assert abs(px - und) / und < 0.06
+
+    with pytest.raises(ValueError, match="Non-NIFTY"):
+        validate_nifty_futures_row(
+            {"TckrSymb": "BANKNIFTY", "SttlmPric": "51850.0", "UndrlygPric": "51700.0"}
+        )
+
+    with pytest.raises(ValueError, match="outside valid NIFTY range"):
+        validate_nifty_futures_row(
+            {"TckrSymb": "NIFTY", "SttlmPric": "51850.0", "UndrlygPric": "51700.0"}
+        )
+
+    with pytest.raises(ValueError, match="basis"):
+        validate_nifty_futures_row(
+            {"TckrSymb": "NIFTY", "SttlmPric": "26500.0", "UndrlygPric": "24000.0"}
+        )
+
+
+def test_options_underlying_range() -> None:
+    """Verify NIFTY options rows validate underlying range [15000, 35000]."""
+    u = validate_nifty_options_row({"TckrSymb": "NIFTY", "UndrlygPric": "24180.5"})
+    assert 15000 < u < 35000
+
+    with pytest.raises(ValueError, match="outside valid NIFTY range"):
+        validate_nifty_options_row({"TckrSymb": "NIFTY", "UndrlygPric": "51200.0"})
+
+
+if __name__ == "__main__":
+    test_fetcher_filter_source()
+    test_futures_data_ranges()
+    test_options_underlying_range()
+    print("symbol filter regression tests PASS")

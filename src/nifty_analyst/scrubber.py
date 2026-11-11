@@ -1,7 +1,8 @@
 """Deterministic secret scrubber and timezone / schedule constants.
 
 Ensures no credentials, tokens, account identifiers, PANs, or phone numbers
-ever reach logs, stdout, reports, or LLM prompts.
+ever reach logs, stdout, reports, or LLM prompts, while preserving benign domain
+keys such as `side`, `calendar_discrepancy_warnings`, `span`, and `candidates_considered`.
 """
 
 from __future__ import annotations
@@ -25,31 +26,69 @@ APPROVED_RUN_TIMES_IST: tuple[dt.time, ...] = (
     dt.time(14, 15, tzinfo=IST),
 )
 
-_SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = (
-    "secret",
-    "token",
-    "password",
-    "passwd",
-    "api_key",
-    "apikey",
-    "consumer_key",
-    "sid",
-    "account",
-    "client_id",
-    "ucc",
-    "pan",
-    "phone",
-    "mobile",
-    "authorization",
-    "bearer",
-    "cookie",
+# Short or ambiguous tokens matched ONLY as whole snake_case/camelCase identifier segments
+# (prevents "sid" redacting "side"/"considered" or "pan" redacting "discrepancy"/"span").
+_SENSITIVE_EXACT_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "password",
+        "passwd",
+        "pwd",
+        "apikey",
+        "sid",
+        "account",
+        "ucc",
+        "pan",
+        "phone",
+        "mobile",
+        "authorization",
+        "bearer",
+        "cookie",
+        "cookies",
+        "mpin",
+        "totp",
+        "otp",
+    }
 )
+
+# Unambiguous multi-word key substrings
+_SENSITIVE_KEY_PHRASES: tuple[str, ...] = (
+    "api_key",
+    "consumer_key",
+    "access_key",
+    "private_key",
+    "secret_key",
+    "session_token",
+    "access_token",
+    "refresh_token",
+    "auth_token",
+    "client_id",
+    "account_id",
+    "account_no",
+    "account_number",
+)
+
+_IDENTIFIER_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 # Regex patterns for Indian PAN, 10-digit mobile numbers, Bearer tokens, and long hex/base64 tokens
 _PAN_RE = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")
 _INDIAN_MOBILE_RE = re.compile(r"(?<![0-9])(?:\+91[\-\s]?)?[6-9][0-9]{9}(?![0-9])")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*")
-_LONG_TOKEN_RE = re.compile(r"\b(?:sk-|ghp_|agy-h-|eyJ)[A-Za-z0-9\-._~+/]{10,}\b")
+_LONG_TOKEN_RE = re.compile(r"\b(?:sk-|ghp_|gho_|agy-h-|eyJ)[A-Za-z0-9\-._~+/]{10,}\b")
+
+
+def is_sensitive_key_name(key: str) -> bool:
+    """Return True if a dictionary key name represents a credential or PII field."""
+    lowered = key.strip().lower()
+    if not lowered:
+        return False
+    if any(phrase in lowered for phrase in _SENSITIVE_KEY_PHRASES):
+        return True
+    segments = {seg for seg in _IDENTIFIER_SPLIT_RE.split(lowered) if seg}
+    return bool(segments & _SENSITIVE_EXACT_SEGMENTS)
 
 
 def ensure_ist(timestamp: dt.datetime) -> dt.datetime:
@@ -65,7 +104,7 @@ def ensure_ist(timestamp: dt.datetime) -> dt.datetime:
 def is_approved_schedule_slot(
     timestamp_ist: dt.datetime,
     tolerance_seconds: int = 300,
-    holiday_dates: frozenset | None = None,
+    holiday_dates: frozenset | set | None = None,
     special_sessions: dict | None = None,
 ) -> bool:
     """Return True if timestamp_ist is within an approved run window.
@@ -73,9 +112,7 @@ def is_approved_schedule_slot(
     Calendar-aware: a weekday listed in `holiday_dates` (verified NSE FO holiday calendar)
     is rejected. A weekend/holiday date is approved only when `special_sessions` maps its ISO
     date to (open_HH:MM, close_HH:MM) from a verified NSE circular, and then only within that
-    actual session interval (plus tolerance) - never before the session opens. When no calendar
-    is supplied, the conservative default holds: weekends rejected, weekdays allowed within the
-    5 fixed slots.
+    actual session interval - never before the session opens.
     """
     ts = ensure_ist(timestamp_ist)
     d = ts.date().isoformat()
@@ -85,11 +122,10 @@ def is_approved_schedule_slot(
         ch, cm = (int(x) for x in close_s.split(":"))
         open_dt = dt.datetime.combine(ts.date(), dt.time(oh, om), tzinfo=IST)
         close_dt = dt.datetime.combine(ts.date(), dt.time(ch, cm), tzinfo=IST)
-        # Strict window: never approved before the special session actually opens.
         return open_dt <= ts <= close_dt
     if ts.weekday() >= 5:
         return False
-    if holiday_dates and d in holiday_dates:
+    if holiday_dates and (d in holiday_dates or ts.date() in holiday_dates):
         return False
     for slot in APPROVED_RUN_TIMES_IST:
         slot_dt = dt.datetime.combine(ts.date(), slot.replace(tzinfo=None), tzinfo=IST)
@@ -103,7 +139,8 @@ class SecretScrubber:
 
     def __init__(self, explicit_secrets: list[str] | None = None) -> None:
         self._explicit_secrets = [
-            s for s in (explicit_secrets or [])
+            s
+            for s in (explicit_secrets or [])
             if s and len(s.strip()) >= 4 and s != "PLACEHOLDER_DO_NOT_COMMIT"
         ]
 
@@ -127,7 +164,7 @@ class SecretScrubber:
             cleaned: dict[str, Any] = {}
             for k, v in obj.items():
                 key_str = str(k)
-                if any(sub in key_str.lower() for sub in _SENSITIVE_KEY_SUBSTRINGS):
+                if is_sensitive_key_name(key_str):
                     cleaned[key_str] = "[REDACTED_KEY_VALUE]"
                 else:
                     cleaned[key_str] = self.scrub_obj(v)

@@ -1,6 +1,9 @@
-"""Deterministic Black-76 / BSM pricing, Brent's IV solver, Greeks, Chain QA suite, and piecewise expiry payoff engine.
+"""Deterministic Black-76 / BSM pricing, Brent's IV solver, Greeks, Chain QA suite,
+constant-maturity variance interpolation, and piecewise expiry payoff engine.
 
 Implements Section 4 of Implementation Plan v3 with zero LLM involvement.
+STT is intentionally excluded per trader directive so technical analysis and options
+surface analytics drive structure selection.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from typing import Literal, Sequence
 from nifty_analyst.scrubber import IST, ensure_ist
 
 OptionType = Literal["CE", "PE"]
+TermStructureRegime = Literal["CONTANGO", "BACKWARDATION", "FLAT", "SINGLE_EXPIRY"]
 
 _SQRT_2 = math.sqrt(2.0)
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
@@ -236,6 +240,69 @@ def solve_iv_black76(
     return brentq_pure(obj, sigma_low, sigma_high)
 
 
+def compute_variance_interpolated_cm30_iv(
+    expiry_t_and_ivs: Sequence[tuple[float, float]],
+    target_days: float = 30.0,
+) -> tuple[float, float, TermStructureRegime]:
+    """Compute constant-maturity 30-day ATM IV via total-variance interpolation across tenors.
+
+    Returns (cm30_iv, near_minus_far_vol_slope, term_structure_regime).
+    """
+    valid = sorted(
+        [(float(t), float(iv)) for t, iv in expiry_t_and_ivs if t > 0.0 and iv > 0.0],
+        key=lambda pair: pair[0],
+    )
+    if not valid:
+        return 0.0, 0.0, "SINGLE_EXPIRY"
+    if len(valid) == 1:
+        return round(valid[0][1], 6), 0.0, "SINGLE_EXPIRY"
+
+    near_t, near_iv = valid[0]
+    far_t, far_iv = valid[-1]
+    slope = round(near_iv - far_iv, 6)
+    if slope > 0.005:
+        regime: TermStructureRegime = "BACKWARDATION"
+    elif slope < -0.005:
+        regime = "CONTANGO"
+    else:
+        regime = "FLAT"
+
+    target_t = target_days / 365.0
+    if target_t <= valid[0][0]:
+        return round(valid[0][1], 6), slope, regime
+
+    # Bracketed total-variance linear interpolation V(T) = sigma(T)^2 * T
+    for i in range(len(valid) - 1):
+        t1, iv1 = valid[i]
+        t2, iv2 = valid[i + 1]
+        if t1 <= target_t <= t2:
+            if abs(t2 - t1) < 1e-9:
+                return round(0.5 * (iv1 + iv2), 6), slope, regime
+            v1 = iv1 * iv1 * t1
+            v2 = iv2 * iv2 * t2
+            w = (target_t - t1) / (t2 - t1)
+            v_target = v1 + w * (v2 - v1)
+            cm_iv = math.sqrt(max(1e-8, v_target / target_t))
+            return round(cm_iv, 6), slope, regime
+
+    # Target tenor lies beyond furthest active expiry: extrapolate only when forward variance > 0,
+    # clamped safely around observed tenors to prevent short-tenor noise blow-up.
+    t1, iv1 = valid[-2]
+    t2, iv2 = valid[-1]
+    v1 = iv1 * iv1 * t1
+    v2 = iv2 * iv2 * t2
+    if t2 - t1 > 1e-6 and v2 > v1:
+        fwd_var = (v2 - v1) / (t2 - t1)
+        v_target = v2 + fwd_var * (target_t - t2)
+        raw_cm = math.sqrt(max(1e-8, v_target / target_t))
+        min_obs = min(iv for _, iv in valid)
+        max_obs = max(iv for _, iv in valid)
+        clamped = min(max(raw_cm, 0.85 * min_obs), 1.15 * max_obs)
+        return round(clamped, 6), slope, regime
+
+    return round(far_iv, 6), slope, regime
+
+
 @dataclass(frozen=True)
 class RawStrikeQuote:
     """Strike-level call/put quote pair for Chain QA and pricing."""
@@ -253,6 +320,10 @@ class RawStrikeQuote:
     put_depth_lots: int = 10
     quote_timestamp_ist: str = ""
     expiry_date: str = ""  # populated by adapter; used to reject mixed-expiry chains
+    call_bid_depth_lots: int | None = None
+    call_ask_depth_lots: int | None = None
+    put_bid_depth_lots: int | None = None
+    put_ask_depth_lots: int | None = None
 
     @property
     def call_mid(self) -> float:
@@ -261,6 +332,20 @@ class RawStrikeQuote:
     @property
     def put_mid(self) -> float:
         return 0.5 * (self.put_bid + self.put_ask)
+
+    def depth_lots_for(self, option_type: OptionType, side: Literal["LONG", "SHORT"]) -> int:
+        """Return executable top-of-book depth for the active order side (LONG lifts ask; SHORT hits bid)."""
+        if option_type == "CE":
+            if side == "LONG" and self.call_ask_depth_lots is not None:
+                return self.call_ask_depth_lots
+            if side == "SHORT" and self.call_bid_depth_lots is not None:
+                return self.call_bid_depth_lots
+            return self.call_depth_lots
+        if side == "LONG" and self.put_ask_depth_lots is not None:
+            return self.put_ask_depth_lots
+        if side == "SHORT" and self.put_bid_depth_lots is not None:
+            return self.put_bid_depth_lots
+        return self.put_depth_lots
 
 
 @dataclass(frozen=True)
@@ -537,15 +622,9 @@ class PiecewisePayoffAnalysis:
     breakevens_gross: list[float]
     breakevens_net: list[float]
     method_description: str
-    worst_case_spot: float = 0.0  # S_T at which the bounded NET (charges incl.) minimum occurs
-    gross_max_loss_per_unit_points: float = 0.0  # payoff-only, before charges/exercise STT
-    # Expiry-hold path (exercise STT on ITM long legs): reported separately and marked
-    # UNBOUNDED when a long call's exercise-STT tail grows without limit as S_T rises.
-    # Holding to expiry is outside the defined-risk model in that case (exit before expiry
-    # is mandatory per the management plan / 1 DTE rule).
-    expiry_hold_max_loss_rs: float = 0.0  # inf when unbounded
-    expiry_hold_worst_spot: float = 0.0
-    expiry_hold_bounded: bool = True
+    worst_case_spot: float = 0.0
+    gross_max_loss_per_unit_points: float = 0.0
+    gross_max_loss_rs: float = 0.0
 
 
 def evaluate_leg_expiry_pnl_per_unit(leg: LegPayoffSpec, spot_at_expiry: float) -> float:
@@ -565,21 +644,13 @@ def compute_piecewise_expiry_payoff(
     lot_size: int,
     lots: int,
     statutory_charges_rs: float = 0.0,
-    exercise_stt_rate: float = 0.0,
 ) -> PiecewisePayoffAnalysis:
     """Compute contractual max loss leg-wise from the piecewise-linear expiry payoff (Section 4.3).
-
-    NET all-in semantics (6 Nov 2026 decision): max loss = min over S_T of
-    gross payoff(S_T) - exercise STT(S_T), with statutory charges subtracted flat per unit,
-    where exercise STT applies at `exercise_stt_rate` x intrinsic on LONG legs ITM at S_T
-    (purchaser pays per Finance Act 2026; short legs pay no settlement STT). Payoff and
-    exercise-STT terms are both piecewise linear with kinks only at leg strikes, so the
-    combined objective's extrema sit on the same grid; the NET worst case can differ from
-    the gross worst spot and is evaluated exactly.
 
     Because European option expiry payoffs are piecewise linear with kinks solely at the leg
     strikes, the minimum and maximum over all S_T >= 0 occur either at S_T = 0, at one of the
     leg strikes K_i, or asymptotically as S_T -> +infinity.
+    STT is excluded per trader directive; only non-STT execution fees shift net breakevens/P&L.
     """
     if not legs:
         raise ValueError("Cannot evaluate payoff of empty leg list.")
@@ -597,7 +668,6 @@ def compute_piecewise_expiry_payoff(
         if leg.option_type == "CE":
             high_spot_slope += float(leg.ratio) if leg.side == "LONG" else -float(leg.ratio)
 
-    # If slope as S_T -> +infinity is negative, loss is unbounded on the upside!
     if high_spot_slope < -1e-9:
         return PiecewisePayoffAnalysis(
             is_defined_risk=False,
@@ -608,9 +678,10 @@ def compute_piecewise_expiry_payoff(
             breakevens_gross=[],
             breakevens_net=[],
             method_description="UNDEFINED_RISK_UNBOUNDED_UPSIDE_SLOPE",
+            gross_max_loss_per_unit_points=math.inf,
+            gross_max_loss_rs=math.inf,
         )
 
-    # Critical terminal spot grid: S_T = 0, below k_min, every strike kink, and well above k_max
     grid = sorted(
         {0.0, max(0.0, k_min - 500.0), max(0.0, k_min - 50.0)}
         | set(strikes)
@@ -620,54 +691,21 @@ def compute_piecewise_expiry_payoff(
     def gross_pnl_pts(s_t: float) -> float:
         return sum(evaluate_leg_expiry_pnl_per_unit(leg, s_t) for leg in legs)
 
-    def exercise_stt_pts(s_t: float) -> float:
-        if exercise_stt_rate <= 0.0:
-            return 0.0
-        total = 0.0
-        for leg in legs:
-            if leg.side != "LONG":
-                continue
-            intrinsic = max(0.0, (s_t - leg.strike) if leg.option_type == "CE" else (leg.strike - s_t))
-            total += float(leg.ratio) * intrinsic
-        return exercise_stt_rate * total
-
-    charges_per_unit_pts_pre = statutory_charges_rs / float(lot_size * lots)
+    charges_per_unit_pts = statutory_charges_rs / float(total_quantity)
 
     def net_pnl_pts(s_t: float) -> float:
-        # Bounded NET (ceiling basis): gross payoff - flat statutory charges allowance.
-        return gross_pnl_pts(s_t) - charges_per_unit_pts_pre
-
-    def expiry_hold_pnl_pts(s_t: float) -> float:
-        # Expiry-hold path: additionally subtract exercise STT on ITM LONG legs at S_T.
-        return net_pnl_pts(s_t) - exercise_stt_pts(s_t)
+        return gross_pnl_pts(s_t) - charges_per_unit_pts
 
     pnl_values = [net_pnl_pts(s) for s in grid]
     min_pnl_pts = min(pnl_values)
     max_pnl_pts = max(pnl_values)
 
-    # Expiry-hold combined optimization over the same kink grid. The tail is unbounded when
-    # any LONG call exists: beyond k_max its intrinsic (and 0.15% exercise STT) grows without
-    # limit while the short side is fully covered - net slope = -rate x long_call_ratio < 0.
-    long_ce_ratio = sum(float(leg.ratio) for leg in legs if leg.option_type == "CE" and leg.side == "LONG")
-    expiry_hold_tail_slope = high_spot_slope - exercise_stt_rate * long_ce_ratio
-    expiry_hold_values = [expiry_hold_pnl_pts(s) for s in grid]
-    expiry_hold_bounded = expiry_hold_tail_slope >= -1e-12
-    if expiry_hold_bounded:
-        expiry_hold_min_pts = min(expiry_hold_values)
-        expiry_hold_worst_spot = grid[expiry_hold_values.index(expiry_hold_min_pts)]
-        expiry_hold_max_loss_rs_val = round(max(0.0, -expiry_hold_min_pts) * total_quantity, 2)
-    else:
-        expiry_hold_worst_spot = grid[-1]
-        expiry_hold_max_loss_rs_val = math.inf
-
-    # Also check if any net short put creates loss below S_T = 0 (impossible since S_T >= 0,
-    # but check if there are unhedged short puts whose loss at S_T = 0 exceeds normal wing width)
+    # Check if unhedged short puts exist below k_min
     low_spot_put_net_short = 0.0
     for leg in legs:
         if leg.option_type == "PE":
             low_spot_put_net_short += float(leg.ratio) if leg.side == "LONG" else -float(leg.ratio)
 
-    # A structure has bounded downside only if net put ratio is >= 0 (every short put is covered by a long put or call structure)
     if low_spot_put_net_short < -1e-9:
         return PiecewisePayoffAnalysis(
             is_defined_risk=False,
@@ -678,17 +716,18 @@ def compute_piecewise_expiry_payoff(
             breakevens_gross=[],
             breakevens_net=[],
             method_description="UNDEFINED_RISK_UNHEDGED_SHORT_PUT",
+            gross_max_loss_per_unit_points=math.inf,
+            gross_max_loss_rs=math.inf,
         )
 
     max_loss_per_unit_pts = max(0.0, -min_pnl_pts)
     max_profit_per_unit_pts = max(0.0, max_pnl_pts)
     worst_case_spot = grid[pnl_values.index(min_pnl_pts)]
     gross_max_loss_per_unit_pts = max(0.0, -min(gross_pnl_pts(s) for s in grid))
-    max_loss_rs = max_loss_per_unit_pts * total_quantity
-    max_profit_rs = max_profit_per_unit_pts * total_quantity
+    gross_max_loss_rs = round(gross_max_loss_per_unit_pts * total_quantity, 2)
+    max_loss_rs = round(max_loss_per_unit_pts * total_quantity, 2)
+    max_profit_rs = round(max_profit_per_unit_pts * total_quantity, 2)
 
-    # Find exact piecewise-linear zero crossings for gross and net breakevens
-    charges_per_unit_pts = statutory_charges_rs / float(total_quantity)
     breakevens_gross: list[float] = []
     breakevens_net: list[float] = []
 
@@ -712,18 +751,13 @@ def compute_piecewise_expiry_payoff(
     return PiecewisePayoffAnalysis(
         is_defined_risk=True,
         max_loss_per_unit_points=round(max_loss_per_unit_pts, 4),
-        max_loss_rs=round(max_loss_rs, 2),
+        max_loss_rs=max_loss_rs,
         max_profit_per_unit_points=round(max_profit_per_unit_pts, 4),
-        max_profit_rs=round(max_profit_rs, 2),
+        max_profit_rs=max_profit_rs,
         breakevens_gross=sorted(set(breakevens_gross)),
         breakevens_net=sorted(set(breakevens_net)),
-        method_description=(
-            "LEG_WISE_PIECEWISE_EXPIRY_PAYOFF_NET_ALL_IN"
-            + ("" if expiry_hold_bounded else " | EXPIRY_HOLD_UNBOUNDED_EXERCISE_STT")
-        ),
+        method_description="LEG_WISE_PIECEWISE_EXPIRY_PAYOFF",
         worst_case_spot=worst_case_spot,
         gross_max_loss_per_unit_points=round(gross_max_loss_per_unit_pts, 4),
-        expiry_hold_max_loss_rs=expiry_hold_max_loss_rs_val,
-        expiry_hold_worst_spot=expiry_hold_worst_spot,
-        expiry_hold_bounded=expiry_hold_bounded,
+        gross_max_loss_rs=gross_max_loss_rs,
     )

@@ -1,3 +1,4 @@
 # Core runtime uses Python 3.11+ standard library only (zero mandatory external network dependencies for offline determinism)
-# Optional test runner:
+# Optional test runner and payoff chart renderer:
 pytest>=8.0.0
+matplotlib>=3.8.0

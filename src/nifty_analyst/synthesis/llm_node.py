@@ -1,10 +1,10 @@
-"""Single-LLM synthesis node with pluggable local-first providers and strict paid-spend guard.
+"""Single-Pass Multi-Persona Synthesis Node (Zero Multicall) with strict paid-spend guard.
 
-HARD CONSTRAINT (Prompt & Section 10):
-- No paid LLM spend is authorized: defaults to local/offline deterministic synthesis, supports
-  local Ollama/vLLM, and places any hosted API behind an explicit config flag with a per-run
-  token and cost budget check.
-- Reads ONLY a typed, sanitised JSON evidence state (scrubbed of any secrets/PII).
+HARD CONSTRAINTS (Prompt & Section 10):
+- Strictly single-pass (zero multi-call HTTP loops): compatible with an LLM agent running
+  inside WhatsApp (`agent_artifact`), local Ollama/vLLM, or offline deterministic mode.
+- No paid LLM spend is authorized by default (`ALLOW_PAID_LLM_SPEND=false`).
+- Reads ONLY typed, sanitised evidence (scrubbed of secrets/PII).
 """
 
 from __future__ import annotations
@@ -17,7 +17,20 @@ from pathlib import Path
 from typing import Any
 
 from nifty_analyst.config import AnalystConfig
-from nifty_analyst.state import CandidateStructure, NiftyOptionsState
+from nifty_analyst.state import (
+    CandidateStructure,
+    ConsolidatorState,
+    DebateState,
+    NiftyOptionsState,
+    RiskTriadState,
+)
+from nifty_analyst.synthesis.personas import (
+    PERSONA_DEFINITIONS,
+    build_compact_desk_brief,
+    build_deterministic_personas,
+    build_single_pass_persona_prompt,
+    parse_optional_persona_states,
+)
 
 
 class PaidLLMSpendNotAuthorizedError(PermissionError):
@@ -34,10 +47,13 @@ class LLMSynthesisResponse:
     citations: list[dict[str, Any]]
     estimated_tokens_used: int = 0
     estimated_cost_inr: float = 0.0
+    debate_state: DebateState | None = None
+    risk_triad_state: RiskTriadState | None = None
+    consolidator_state: ConsolidatorState | None = None
 
 
 class LLMProvider(abc.ABC):
-    """Pluggable interface for Phase 1 single-LLM synthesis."""
+    """Pluggable interface for single-pass persona synthesis."""
 
     @abc.abstractmethod
     def synthesize(
@@ -47,13 +63,13 @@ class LLMProvider(abc.ABC):
         primary: CandidateStructure | None,
         alternatives: list[CandidateStructure],
     ) -> LLMSynthesisResponse:
-        """Synthesize qualitative rationale and return explicit state_field_path citations."""
+        """Synthesize multi-persona debate, consolidator verdict, and state_field_path citations."""
 
 
 class OfflineDeterministicSynthesisProvider(LLMProvider):
-    """Zero-cost local synthesis provider grounded 100% in NiftyOptionsState fields."""
+    """Zero-cost deterministic persona synthesizer grounded 100% in NiftyOptionsState fields."""
 
-    def __init__(self, model_id: str = "deterministic-local-synthesizer-v3") -> None:
+    def __init__(self, model_id: str = "deterministic-persona-synthesizer-v4") -> None:
         self.model_id = model_id
 
     def synthesize(
@@ -63,11 +79,19 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
         primary: CandidateStructure | None,
         alternatives: list[CandidateStructure],
     ) -> LLMSynthesisResponse:
-        _ = sanitised_state_json  # Verified serialisable and scrubbed before call
+        _ = sanitised_state_json
+        _ = alternatives
         spot = state.contract_context.spot.value
         ps = state.market_evidence.price_structure
         vol = state.market_evidence.volatility_state
         pos = state.market_evidence.derivatives_positioning
+
+        eligible = [c for c in state.candidate_structures if c.part_a_overall_status == "PASS"]
+        debate, triad, consolidator, chosen = build_deterministic_personas(
+            state=state,
+            default_primary=primary,
+            eligible_candidates=eligible,
+        )
 
         citations: list[dict[str, Any]] = [
             {
@@ -86,6 +110,11 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
                 "cited_value": ps.ma20_1h,
             },
             {
+                "claim_text": f"1H RSI(14) is {ps.rsi_14_1h}",
+                "state_field_path": "market_evidence.price_structure.rsi_14_1h",
+                "cited_value": ps.rsi_14_1h,
+            },
+            {
                 "claim_text": f"90-session IVP is {vol.ivp_90d}",
                 "state_field_path": "market_evidence.volatility_state.ivp_90d",
                 "cited_value": vol.ivp_90d,
@@ -102,99 +131,108 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
             },
         ]
 
-        if primary is not None:
-            # Find index of primary in state.candidate_structures
+        if chosen is not None:
             idx = next(
                 (
                     i
                     for i, c in enumerate(state.candidate_structures)
-                    if c.structure_id == primary.structure_id
+                    if c.structure_id == chosen.structure_id
                 ),
                 0,
             )
             citations.extend(
                 [
                     {
-                        "claim_text": f"Primary candidate {primary.structure_id} has contractual max loss Rs {primary.contractual_max_loss_rs}",
+                        "claim_text": f"Recommended candidate {chosen.structure_id} has contractual max loss Rs {chosen.contractual_max_loss_rs}",
                         "state_field_path": f"candidate_structures[{idx}].contractual_max_loss_rs",
-                        "cited_value": primary.contractual_max_loss_rs,
+                        "cited_value": chosen.contractual_max_loss_rs,
                     },
                     {
-                        "claim_text": f"Primary candidate planned stop is Rs {primary.planned_stop_rs}",
+                        "claim_text": f"Recommended candidate planned stop is Rs {chosen.planned_stop_rs}",
                         "state_field_path": f"candidate_structures[{idx}].planned_stop_rs",
-                        "cited_value": primary.planned_stop_rs,
+                        "cited_value": chosen.planned_stop_rs,
                     },
                     {
-                        "claim_text": f"Portfolio summed stop after trade is Rs {primary.portfolio_summed_stop_after_trade_rs}",
+                        "claim_text": f"Portfolio summed stop after trade is Rs {chosen.portfolio_summed_stop_after_trade_rs}",
                         "state_field_path": f"candidate_structures[{idx}].portfolio_summed_stop_after_trade_rs",
-                        "cited_value": primary.portfolio_summed_stop_after_trade_rs,
+                        "cited_value": chosen.portfolio_summed_stop_after_trade_rs,
                     },
                     {
-                        "claim_text": f"Written invalidation level is {primary.invalidation_level}",
+                        "claim_text": f"Written invalidation level is {chosen.invalidation_level}",
                         "state_field_path": f"candidate_structures[{idx}].invalidation_level",
-                        "cited_value": primary.invalidation_level,
+                        "cited_value": chosen.invalidation_level,
+                    },
+                    {
+                        "claim_text": f"Technical + Options composite score is {chosen.technical_options_score}",
+                        "state_field_path": f"candidate_structures[{idx}].technical_options_score",
+                        "cited_value": chosen.technical_options_score,
                     },
                 ]
             )
 
             reasoning = (
                 f"Spot is at {spot} (`contract_context.spot.value`) with 1D structure in "
-                f"{ps.trend_1d_state} (`market_evidence.price_structure.trend_1d_state`) and "
-                f"completed 1H MA20 at {ps.ma20_1h} (`market_evidence.price_structure.ma20_1h`). "
+                f"`{ps.trend_1d_state}` (`market_evidence.price_structure.trend_1d_state`), "
+                f"completed 1H MA20 at {ps.ma20_1h} (`market_evidence.price_structure.ma20_1h`), "
+                f"and 1H RSI(14) at {ps.rsi_14_1h} (`market_evidence.price_structure.rsi_14_1h`). "
                 f"90-session IVP stands at {vol.ivp_90d} (`market_evidence.volatility_state.ivp_90d`) "
-                f"with Put OI support at {pos.put_oi_wall_strike} and Call OI resistance at "
-                f"{pos.call_oi_wall_strike}. Primary structure `{primary.structure_id}` "
-                f"({primary.structure_type}) passes all applicable Part A checks with leg-wise "
-                f"contractual payoff bound (gross, KNOWN) of Rs {primary.contractual_max_loss_rs:.2f} (within the Rs 10,000 "
-                f"per-trade ceiling; all-in costs labeled separately), indicative managed stop of Rs {primary.planned_stop_rs:.2f}, and "
-                f"portfolio summed stop of Rs {primary.portfolio_summed_stop_after_trade_rs:.2f} "
-                f"(within the Rs 10,000 summed-stop cap). Thesis is invalidated on a "
-                f"{primary.invalidation_candle_basis} beyond {primary.invalidation_level}."
+                f"in `{vol.term_structure_regime}` term structure with Put OI support at "
+                f"{pos.put_oi_wall_strike} and Call OI resistance at {pos.call_oi_wall_strike}. "
+                f"Following Bull/Bear/Vol debate and Risk Triad review, Consolidator selects "
+                f"`{chosen.structure_id}` ({chosen.structure_type}, `{chosen.expiry_date}`, "
+                f"Tech+Options score {chosen.technical_options_score}/100) with contractual payoff bound "
+                f"Rs {chosen.contractual_max_loss_rs:.2f} (<= Rs 10,000 ceiling), managed stop "
+                f"Rs {chosen.planned_stop_rs:.2f}, and portfolio summed stop "
+                f"Rs {chosen.portfolio_summed_stop_after_trade_rs:.2f}. Thesis invalidates on a "
+                f"{chosen.invalidation_candle_basis} beyond {chosen.invalidation_level}."
             )
         else:
             reasoning = (
-                f"Spot is at {spot} (`contract_context.spot.value`) with 1D trend {ps.trend_1d_state} "
-                f"and 90-session IVP at {vol.ivp_90d}. No candidate structure satisfied all binding "
-                f"Part A checks and risk-reward criteria after statutory charges; sitting out (`WAIT`)."
+                f"Spot is at {spot} (`contract_context.spot.value`) with 1D trend `{ps.trend_1d_state}` "
+                f"and 90-session IVP at {vol.ivp_90d}. Consolidator recommends sitting out (`WAIT`): "
+                f"no candidate satisfied both deterministic Part A rules and multi-persona regime alignment."
             )
 
         habitual_note = (
-            "Credit spreads (Bull Put Spread / Bear Call Spread / Iron Condor) and debit spreads / "
-            "butterflies were generated and evaluated on equal footing without style filtering. "
-            "See Section 6 table for exact cost, max loss, breakeven, PoP, and vega comparison."
+            "All defined-risk families (Bull/Bear Credit & Debit Verticals, Iron Condors, Iron Butterflies, "
+            "Directional Butterflies, and Legged Condor Components) were priced and scored solely on "
+            "technical alignment and options surface edge (STT excluded per trader directive)."
         )
 
-        # Check if any candidate failed solely because of the 200-pt habitual width exceeding Rs 10,000 max loss
         wide_failed = [
             c
             for c in state.candidate_structures
-            if c.width_points >= 200.0
-            and c.contractual_max_loss_rs > 10000.0
+            if c.width_points >= 200.0 and c.contractual_max_loss_rs > 10000.0
         ]
         if wide_failed:
             w = wide_failed[0]
             challenge_note = (
                 f"RESEARCH NOTE (Between-Trade Context): Habitual 200-pt width structure `{w.structure_id}` "
-                f"(lot_size={w.lot_size}) has a leg-wise contractual max loss of Rs {w.contractual_max_loss_rs:.2f}, "
-                f"which exceeds the settled Rs 10,000 per-trade contractual max loss ceiling (6 Nov 2026) "
-                f"unless net credit exceeds {(w.width_points - 10000.0 / w.lot_size):.1f} pts or wing width is "
-                f"tightened to 150 pts."
+                f"(lot_size={w.lot_size}) has a contractual max loss of Rs {w.contractual_max_loss_rs:.2f}, "
+                f"exceeding the Rs 10,000 per-trade ceiling unless net credit exceeds "
+                f"{(w.width_points - 10000.0 / w.lot_size):.1f} pts or wing width is 150 pts / smaller lot expiry."
             )
         else:
             challenge_note = "None. All Part A rules and Part B style heuristics are consistent on this snapshot."
 
-        # Mirror the pipeline's live-ready gate exactly: SUGGESTION + verified IVP +
-        # primary Part A PASS. Anything else is research-only with the concrete reason.
-        if primary is not None and vol.ivp_90d != "UNKNOWN" and primary.part_a_overall_status == "PASS":
-            conf_note = "LIVE-READY (IVP verified and all Part A checks PASS)."
-        elif vol.ivp_90d == "UNKNOWN":
-            conf_note = ("RESEARCH-ONLY: Verified historical IVP is UNKNOWN; output cannot be "
-                         "used for live execution until IVP history is populated.")
-        elif primary is None:
-            conf_note = "RESEARCH-ONLY: no candidate satisfied all binding Part A checks (verdict WAIT)."
+        if (
+            chosen is not None
+            and vol.ivp_30d != "UNKNOWN"
+            and vol.ivp_90d != "UNKNOWN"
+            and chosen.part_a_overall_status == "PASS"
+        ):
+            conf_note = (
+                f"LIVE-READY ({consolidator.conviction} conviction; IVP verified and all Part A checks PASS)."
+            )
+        elif vol.ivp_30d == "UNKNOWN" or vol.ivp_90d == "UNKNOWN":
+            conf_note = (
+                "RESEARCH-ONLY: Verified historical IVP is UNKNOWN; output cannot be "
+                "used for live execution until IVP history is populated."
+            )
+        elif chosen is None:
+            conf_note = "RESEARCH-ONLY: Consolidator / Part A verdict is WAIT (no live trade proposed)."
         else:
-            conf_note = (f"RESEARCH-ONLY: primary candidate Part A status is "
-                         f"{primary.part_a_overall_status}.")
+            conf_note = f"RESEARCH-ONLY: primary candidate Part A status is {chosen.part_a_overall_status}."
 
         return LLMSynthesisResponse(
             model_id=self.model_id,
@@ -205,14 +243,17 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
             citations=citations,
             estimated_tokens_used=0,
             estimated_cost_inr=0.0,
+            debate_state=debate,
+            risk_triad_state=triad,
+            consolidator_state=consolidator,
         )
 
 
 class LocalEndpointLLMProvider(LLMProvider):
-    """Adapter for local Ollama / vLLM HTTP endpoints (zero paid API spend).
+    """Single-call adapter for local Ollama (`/api/generate`) or vLLM (`/v1/chat/completions`).
 
-    Falls back cleanly to OfflineDeterministicSynthesisProvider if the local server is unreachable
-    in offline tests.
+    Sends ONLY the compact Desk Brief + TradingAgents persona pack in a single HTTP request
+    (zero multicall). Falls back cleanly to `OfflineDeterministicSynthesisProvider` if offline.
     """
 
     def __init__(self, endpoint_url: str, model_id: str) -> None:
@@ -227,7 +268,6 @@ class LocalEndpointLLMProvider(LLMProvider):
         primary: CandidateStructure | None,
         alternatives: list[CandidateStructure],
     ) -> LLMSynthesisResponse:
-        # Ensure only localhost / 127.0.0.1 is called by LocalEndpointLLMProvider
         if not (
             self.endpoint_url.startswith("http://127.0.0.1")
             or self.endpoint_url.startswith("http://localhost")
@@ -236,24 +276,44 @@ class LocalEndpointLLMProvider(LLMProvider):
                 f"LocalEndpointLLMProvider requires localhost URL; got {self.endpoint_url!r}"
             )
         try:
-            prompt = (
-                "You are a NIFTY 50 options research synthesizer. Using ONLY the following JSON state, "
-                "return JSON with keys reasoning_summary, habitual_comparison_note, "
-                "research_rule_challenge_note, confidence_note, citations.\n"
-                f"STATE:\n{sanitised_state_json}"
-            )
-            payload = json.dumps(
-                {"model": self.model_id, "prompt": prompt, "stream": False, "format": "json"}
-            ).encode("utf-8")
+            desk_brief = build_compact_desk_brief(state)
+            prompt = build_single_pass_persona_prompt(desk_brief)
+            eligible = [c for c in state.candidate_structures if c.part_a_overall_status == "PASS"]
+            fb_deb, fb_triad, fb_cons, _ = build_deterministic_personas(state, primary, eligible)
+
+            if "/v1/chat/completions" in self.endpoint_url:
+                payload = json.dumps(
+                    {
+                        "model": self.model_id,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.1,
+                        "response_format": {"type": "json_object"},
+                    }
+                ).encode("utf-8")
+            else:
+                payload = json.dumps(
+                    {"model": self.model_id, "prompt": prompt, "stream": False, "format": "json"}
+                ).encode("utf-8")
+
             req = urllib.request.Request(
                 self.endpoint_url,
                 data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-                parsed = json.loads(body.get("response", "{}"))
+                if "choices" in body:
+                    raw_text = body["choices"][0]["message"]["content"]
+                    tokens_used = int(body.get("usage", {}).get("total_tokens", 0))
+                else:
+                    raw_text = body.get("response", "{}")
+                    tokens_used = int(body.get("eval_count", 0))
+
+                parsed = json.loads(raw_text)
+                deb, triad, cons = parse_optional_persona_states(
+                    parsed, fb_deb, fb_triad, fb_cons
+                )
                 return LLMSynthesisResponse(
                     model_id=self.model_id,
                     reasoning_summary=str(parsed["reasoning_summary"]),
@@ -263,15 +323,18 @@ class LocalEndpointLLMProvider(LLMProvider):
                     ),
                     confidence_note=str(parsed.get("confidence_note", "")),
                     citations=list(parsed.get("citations", [])),
-                    estimated_tokens_used=int(body.get("eval_count", 0)),
+                    estimated_tokens_used=tokens_used,
                     estimated_cost_inr=0.0,
+                    debate_state=deb,
+                    risk_triad_state=triad,
+                    consolidator_state=cons,
                 )
         except Exception:
             return self._fallback.synthesize(sanitised_state_json, state, primary, alternatives)
 
 
 class HostedBudgetGuardedLLMProvider(LLMProvider):
-    """Hosted LLM provider guarded by explicit trader authorization and per-run cost/token cap."""
+    """Single-call hosted LLM provider guarded by explicit trader authorization and token/cost cap."""
 
     def __init__(self, config: AnalystConfig) -> None:
         self.config = config
@@ -289,7 +352,12 @@ class HostedBudgetGuardedLLMProvider(LLMProvider):
                 "No paid LLM call is authorized without explicit trader budget approval."
             )
 
-        est_tokens = max(1, len(sanitised_state_json) // 4 + 600)
+        if state is not None:
+            compact_prompt = build_single_pass_persona_prompt(build_compact_desk_brief(state))
+            est_tokens = max(1, len(compact_prompt) // 4 + 500)
+        else:
+            est_tokens = max(1, len(sanitised_state_json) // 4 + 500)
+
         if est_tokens > self.config.max_tokens_per_run:
             raise PaidLLMSpendNotAuthorizedError(
                 f"Estimated token count ({est_tokens}) exceeds MAX_TOKENS_PER_RUN "
@@ -303,8 +371,6 @@ class HostedBudgetGuardedLLMProvider(LLMProvider):
                 f"(Rs {self.config.max_cost_per_run_inr:.4f})."
             )
 
-        # Even if budget flags are enabled in unit tests, delegate to deterministic synthesis
-        # unless a live endpoint is explicitly configured
         delegate = OfflineDeterministicSynthesisProvider(model_id=self.config.llm_model_id)
         res = delegate.synthesize(sanitised_state_json, state, primary, alternatives)
         return LLMSynthesisResponse(
@@ -316,19 +382,21 @@ class HostedBudgetGuardedLLMProvider(LLMProvider):
             citations=res.citations,
             estimated_tokens_used=est_tokens,
             estimated_cost_inr=round(est_cost_inr, 4),
+            debate_state=res.debate_state,
+            risk_triad_state=res.risk_triad_state,
+            consolidator_state=res.consolidator_state,
         )
 
 
 class AgentArtifactSynthesisProvider(LLMProvider):
-    """External synthesis artifact provider (Phase 1 single-LLM synthesis written by
-    Instinct, the analyst operator).
+    """External single-pass synthesis seam for the WhatsApp / operator LLM agent.
 
-    The hourly run pauses before the synthesis layer; the operator reads ONLY the
-    sanitised MarketEvidenceState JSON and writes an artifact file containing the
-    qualitative synthesis plus explicit state_field_path citations. This provider
-    loads that artifact with strict schema validation and returns it as a standard
-    LLMSynthesisResponse, so verifier.py runs unchanged downstream. Zero paid spend
-    by construction (no endpoint, no tokens, cost pinned at 0).
+    1. Exports `<artifact>.request.json` containing `compact_desk_brief`,
+       `persona_instructions` (Bull / Bear / Vol Debate, Risk Triad, Consolidator),
+       `single_pass_prompt`, and `sanitised_state` bound to `run_id` + `decision_timestamp_ist`.
+    2. Reads the single JSON artifact written by the WhatsApp LLM agent, validates run binding
+       and citations, and parses both the core synthesis fields and optional `debate_state`,
+       `risk_triad`, and `consolidator` blocks (zero multicall, zero paid API spend).
     """
 
     REQUIRED_KEYS = {
@@ -352,6 +420,7 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         primary: CandidateStructure | None,
         alternatives: list[CandidateStructure],
     ) -> LLMSynthesisResponse:
+        _ = alternatives
         if not self.artifact_path:
             raise ValueError(
                 "agent_artifact provider requires AGENT_SYNTHESIS_ARTIFACT_PATH "
@@ -360,16 +429,18 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         p = Path(self.artifact_path)
         run_id = state.run_metadata.run_id
         decision_ts = state.run_metadata.decision_timestamp_ist
-        # Scheduled orchestration seam: always (re)export THIS run's request - the
-        # sanitised evidence after the deterministic gates plus the run identity - so
-        # the agent writes its artifact from current evidence, never fixture text or
-        # a stale export.
+        desk_brief = build_compact_desk_brief(state)
+
         request_path = p.with_name(p.name + ".request.json")
+        request_path.parent.mkdir(parents=True, exist_ok=True)
         request_path.write_text(
             json.dumps(
                 {
                     "run_id": run_id,
                     "decision_timestamp_ist": decision_ts,
+                    "compact_desk_brief": desk_brief,
+                    "persona_instructions": PERSONA_DEFINITIONS,
+                    "single_pass_prompt": build_single_pass_persona_prompt(desk_brief),
                     "sanitised_state": json.loads(sanitised_state_json),
                 },
                 indent=2,
@@ -387,7 +458,6 @@ class AgentArtifactSynthesisProvider(LLMProvider):
         missing = self.REQUIRED_KEYS - set(payload)
         if missing:
             raise ValueError(f"agent synthesis artifact missing keys: {sorted(missing)}")
-        # Run-ID / as-of binding: refuse stale or foreign artifacts outright.
         if payload["run_id"] != run_id or payload["decision_timestamp_ist"] != decision_ts:
             raise ValueError(
                 f"stale or foreign artifact: bound to run "
@@ -403,6 +473,13 @@ class AgentArtifactSynthesisProvider(LLMProvider):
                 "agent synthesis artifact citations must be objects with "
                 "claim_text and state_field_path"
             )
+
+        eligible = [c for c in state.candidate_structures if c.part_a_overall_status == "PASS"]
+        fb_deb, fb_triad, fb_cons, _ = build_deterministic_personas(state, primary, eligible)
+        deb, triad, cons = parse_optional_persona_states(
+            payload, fb_deb, fb_triad, fb_cons
+        )
+
         return LLMSynthesisResponse(
             model_id=str(payload["model_id"]),
             reasoning_summary=str(payload["reasoning_summary"]),
@@ -412,6 +489,9 @@ class AgentArtifactSynthesisProvider(LLMProvider):
             citations=citations,
             estimated_tokens_used=0,
             estimated_cost_inr=0.0,
+            debate_state=deb,
+            risk_triad_state=triad,
+            consolidator_state=cons,
         )
 
 
@@ -422,4 +502,4 @@ def build_llm_provider(config: AnalystConfig) -> LLMProvider:
         return LocalEndpointLLMProvider(config.llm_endpoint_url, config.llm_model_id)
     if config.llm_provider == "agent_artifact":
         return AgentArtifactSynthesisProvider(config.agent_synthesis_artifact_path)
-    return OfflineDeterministicSynthesisProvider(model_id="deterministic-local-synthesizer-v3")
+    return OfflineDeterministicSynthesisProvider(model_id="deterministic-persona-synthesizer-v4")

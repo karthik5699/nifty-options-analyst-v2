@@ -1,8 +1,10 @@
-"""Deterministic Post-LLM Citation & Part A Verifier (Sections 2.1, 7, 8.4, 11).
+"""Deterministic Two-Way Post-LLM Citation, Prose Numeric & Part A Verifier (Sections 2.1, 7, 8.4, 11).
 
-Resolves every state_field_path cited by the LLM against the actual NiftyOptionsState
-dictionary, checks numeric/string equality, and re-verifies Part A statuses before
-any output can reach the trader.
+1. Forward check: Resolves every `state_field_path` cited by the LLM against `NiftyOptionsState`.
+2. Reverse prose check: Scans LLM prose (reasoning, Bull/Bear/Vol debate, Risk Triad, Consolidator)
+   for invented structure IDs, ungrounded `Rs <amount>` figures, and confabulated NIFTY index levels.
+3. Consolidator & Part A re-verification: Confirms any recommended structure exists in
+   `state.candidate_structures` and holds `part_a_overall_status == 'PASS'`.
 """
 
 from __future__ import annotations
@@ -19,6 +21,14 @@ from nifty_analyst.state import (
 )
 
 _INDEX_STEP_RE = re.compile(r"^([a-zA-Z0-9_]+)(?:\[(\d+)\])?$")
+_STRUCT_ID_RE = re.compile(
+    r"\b(?:BPS|BCS|BULL_BFLY|BEAR_CS|BEAR_PS|BEAR_BFLY|IC|IBFLY|LEG_IC_(?:PE|CE))_\d{4}-\d{2}-\d{2}_[0-9_]+\b"
+)
+_RUPEE_RE = re.compile(r"\bRs\.?\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_INDEX_LEVEL_RE = re.compile(r"(?<![0-9-])(1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})(?:\.(\d+))?(?![0-9-])")
+
+_POLICY_CONSTANTS: tuple[float, ...] = (2000.0, 10000.0, 0.0, 100.0, 150.0, 200.0)
 
 
 def resolve_state_path(state_dict: dict[str, Any], path: str) -> tuple[bool, Any]:
@@ -54,13 +64,88 @@ def values_match(actual: Any, cited: Any, float_tol: float = 0.05) -> bool:
     return str(actual).strip() == str(cited).strip()
 
 
+def _collect_state_numbers(obj: Any, out: list[float]) -> None:
+    if isinstance(obj, bool) or obj is None:
+        return
+    if isinstance(obj, (int, float)):
+        fval = float(obj)
+        if math.isfinite(fval):
+            out.append(fval)
+        return
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _collect_state_numbers(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            _collect_state_numbers(item, out)
+
+
+def _scan_prose_for_hallucinations(
+    state: NiftyOptionsState,
+    state_dict: dict[str, Any],
+    prose_texts: Sequence[str],
+) -> tuple[int, list[str]]:
+    """Verify structure IDs, `Rs <amount>` claims, and NIFTY index levels in LLM prose."""
+    if not prose_texts:
+        return 0, []
+
+    known_numbers: list[float] = list(_POLICY_CONSTANTS)
+    _collect_state_numbers(state_dict, known_numbers)
+    for c in state.candidate_structures:
+        known_numbers.append(0.55 * c.max_profit_rs)
+        known_numbers.append(c.width_points - (10000.0 / max(1, c.lot_size)))
+
+    valid_struct_ids = {c.structure_id for c in state.candidate_structures}
+    checked_count = 0
+    uncited: list[str] = []
+
+    def _matches_known(val: float, tol: float = 1.05) -> bool:
+        return any(abs(val - k) <= tol for k in known_numbers)
+
+    for text in prose_texts:
+        if not text:
+            continue
+        # Remove ISO dates and structure IDs before scanning standalone numbers
+        for sid in _STRUCT_ID_RE.findall(text):
+            checked_count += 1
+            if sid not in valid_struct_ids:
+                uncited.append(f"unknown_structure_id:{sid}")
+
+        stripped = _STRUCT_ID_RE.sub(" ", text)
+        stripped = _DATE_RE.sub(" ", stripped)
+
+        for m_rs in _RUPEE_RE.finditer(stripped):
+            raw_num = m_rs.group(1).replace(",", "")
+            try:
+                val = float(raw_num)
+            except ValueError:
+                continue
+            checked_count += 1
+            if not _matches_known(val, tol=1.05):
+                uncited.append(f"Rs {raw_num}")
+
+        # Strip matched Rs amounts so we don't double-check `Rs 20,000` as an index level
+        stripped_no_rs = _RUPEE_RE.sub(" ", stripped)
+        for m_lvl in _INDEX_LEVEL_RE.finditer(stripped_no_rs):
+            whole, frac = m_lvl.group(1), m_lvl.group(2)
+            raw_lvl = f"{whole}.{frac}" if frac else whole
+            val = float(raw_lvl)
+            checked_count += 1
+            if not _matches_known(val, tol=1.05):
+                uncited.append(f"index_level:{raw_lvl}")
+
+    return checked_count, uncited
+
+
 def verify_llm_synthesis(
     state: NiftyOptionsState,
     raw_citations: Sequence[dict[str, Any]],
     selected_primary: CandidateStructure | None,
     max_unsupported_claim_rate: float = 0.02,
+    prose_texts: Sequence[str] = (),
+    consolidator_recommended_id: str | None = None,
 ) -> tuple[list[LLMClaimCitation], VerifierReport]:
-    """Deterministically verify every LLM-cited figure and re-verify Part A compliance."""
+    """Deterministically verify every LLM-cited figure, prose claims, and Part A compliance."""
     state_dict = state.to_dict()
     verified_citations: list[LLMClaimCitation] = []
     unverified_count = 0
@@ -102,7 +187,9 @@ def verify_llm_synthesis(
             LLMClaimCitation(
                 claim_text=claim_text,
                 state_field_path=field_path,
-                cited_value=cited_val if isinstance(cited_val, (int, float, str, bool)) else str(cited_val),
+                cited_value=(
+                    cited_val if isinstance(cited_val, (int, float, str, bool)) else str(cited_val)
+                ),
                 verified_in_state=matched,
                 verification_note=note,
             )
@@ -111,13 +198,35 @@ def verify_llm_synthesis(
     total = len(verified_citations)
     unsupported_rate = (unverified_count / float(total)) if total > 0 else 0.0
 
-    # Re-verify Part A compliance of primary proposal
+    # Reverse prose hallucination scan
+    prose_checked, uncited_prose = _scan_prose_for_hallucinations(state, state_dict, prose_texts)
+    if uncited_prose:
+        failure_reasons.append(
+            f"PROSE_NUMERIC_HALLUCINATION: ungrounded prose claims detected {uncited_prose}."
+        )
+
+    # Re-verify Consolidator recommendation & Part A compliance of primary proposal
     part_a_reverified = True
+    if consolidator_recommended_id and consolidator_recommended_id != "WAIT":
+        by_id = {c.structure_id: c for c in state.candidate_structures}
+        rec_cand = by_id.get(consolidator_recommended_id)
+        if rec_cand is None:
+            part_a_reverified = False
+            failure_reasons.append(
+                f"Consolidator recommended non-existent structure {consolidator_recommended_id!r}."
+            )
+        elif rec_cand.part_a_overall_status != "PASS":
+            part_a_reverified = False
+            failure_reasons.append(
+                f"Consolidator recommended {consolidator_recommended_id!r} whose Part A status is "
+                f"{rec_cand.part_a_overall_status!r} (must be 'PASS')."
+            )
+
     if selected_primary is not None:
         any_fail = any(
             chk.status == "FAIL" for chk in selected_primary.part_a_checks.values()
         )
-        if any_fail or selected_primary.part_a_overall_status == "FAIL":
+        if any_fail or selected_primary.part_a_overall_status != "PASS":
             part_a_reverified = False
             failure_reasons.append(
                 f"Primary structure {selected_primary.structure_id} failed Part A re-verification."
@@ -144,6 +253,7 @@ def verify_llm_synthesis(
         total > 0
         and unsupported_rate <= max_unsupported_claim_rate
         and part_a_reverified
+        and len(uncited_prose) == 0
     )
 
     report = VerifierReport(
@@ -153,5 +263,7 @@ def verify_llm_synthesis(
         part_a_reverified=part_a_reverified,
         passed_verification=passed,
         failure_reasons=failure_reasons,
+        prose_numbers_checked=prose_checked,
+        uncited_prose_numbers=uncited_prose,
     )
     return verified_citations, report

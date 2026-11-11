@@ -2,12 +2,12 @@
 
 STRICT CONSTRAINTS:
 - Appends an immutable record of run inputs and outputs only: run_id, timestamp_ist,
-  data_version_hash, model_ids, frozen_evidence_state, candidates_considered, verdict,
-  and full report.
+  data_version_hash, model_ids, frozen_evidence_state, candidates_considered, persona
+  synthesis states, verdict, and full report.
 - Records NO outcomes, NO P&L, NO settlement, and feeds NO performance loop.
-- Alert-only output: produces user-facing report output ONLY when verdict == 'SUGGESTION'
-  (unless force_render_for_inspection=True in Phase 0 offline gate review).
-  'WAIT' and 'INSUFFICIENT DATA' are written quietly to the audit log with no routine message.
+- Alert-only output: produces user-facing report output ONLY when verdict == 'SUGGESTION',
+  `is_live_ready == True`, and `duplicate_alert_suppressed == False`
+  (unless `force_render_for_inspection=True` in offline gate review).
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ class AuditDeliveryResult:
     audit_log_path: str
     record_sha256: str
     full_report_markdown: str
+    whatsapp_digest: str = ""
 
 
 def append_immutable_audit_record(
@@ -61,6 +62,9 @@ def append_immutable_audit_record(
             "market_evidence": state_dict["market_evidence"],
         },
         "candidates_considered": state_dict["candidate_structures"],
+        "debate_state": state_dict.get("debate_state"),
+        "risk_triad_state": state_dict.get("risk_triad_state"),
+        "consolidator_state": state_dict.get("consolidator_state"),
         "final_output": state_dict["final_output"],
         "report_markdown": clean_report,
     }
@@ -83,14 +87,14 @@ def deliver_run_output(
     scrubber: SecretScrubber | None = None,
     force_render_for_inspection: bool = False,
 ) -> AuditDeliveryResult:
-    """Enforce alert-only delivery policy and write immutable audit record.
-
-    - If verdict == 'SUGGESTION' (or force_render_for_inspection=True), returns the full report.
-    - If verdict in ('WAIT', 'INSUFFICIENT DATA') and not force_render_for_inspection,
-      writes to the audit log and returns an empty user_facing_message (no routine ping).
-    """
+    """Enforce alert-only delivery policy and write immutable audit record."""
     scrubber = scrubber or SecretScrubber()
     full_report = render_analyst_report(state, scrubber=scrubber)
+    clean_wa = (
+        scrubber.scrub_text(state.final_output.whatsapp_digest)
+        if (state.final_output and state.final_output.whatsapp_digest)
+        else ""
+    )
     _, sha256_hex = append_immutable_audit_record(
         state=state,
         report_markdown=full_report,
@@ -99,15 +103,18 @@ def deliver_run_output(
     )
 
     verdict = state.final_output.verdict if state.final_output else "INSUFFICIENT DATA"
-    # Alert only a live-ready SUGGESTION (IVP verified + Part A PASS); never an
-    # uncertified or research-only verdict, even when it renders for inspection.
-    alerted = verdict == "SUGGESTION" and bool(
-        state.final_output and state.final_output.is_live_ready
+    suppressed = bool(state.final_output and state.final_output.duplicate_alert_suppressed)
+    alerted = (
+        verdict == "SUGGESTION"
+        and bool(state.final_output and state.final_output.is_live_ready)
+        and not suppressed
     )
     if alerted or force_render_for_inspection:
         user_msg = full_report
+        wa_msg = clean_wa
     else:
         user_msg = ""
+        wa_msg = ""
 
     return AuditDeliveryResult(
         run_id=state.run_metadata.run_id,
@@ -117,4 +124,5 @@ def deliver_run_output(
         audit_log_path=str(audit_log_path),
         record_sha256=sha256_hex,
         full_report_markdown=full_report,
+        whatsapp_digest=wa_msg,
     )

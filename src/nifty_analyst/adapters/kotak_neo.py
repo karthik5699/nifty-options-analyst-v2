@@ -279,9 +279,13 @@ def parse_and_validate_option_chain(
             if item.get("call_ltp_only"):
                 item["call_bid"] = item["call_ask"] = 0.0
                 item["call_depth_lots"] = 0
+                item["call_bid_depth_lots"] = 0
+                item["call_ask_depth_lots"] = 0
             if item.get("put_ltp_only"):
                 item["put_bid"] = item["put_ask"] = 0.0
                 item["put_depth_lots"] = 0
+                item["put_bid_depth_lots"] = 0
+                item["put_ask_depth_lots"] = 0
         quote_dt = ensure_ist(dt.datetime.fromisoformat(ts_str))
         quote_times.append(quote_dt)
 
@@ -303,6 +307,27 @@ def parse_and_validate_option_chain(
                 call_depth_lots=int(item.get("call_depth_lots", 10)),
                 put_depth_lots=int(item.get("put_depth_lots", 10)),
                 quote_timestamp_ist=quote_dt.isoformat(),
+                expiry_date=expiry_date,
+                call_bid_depth_lots=(
+                    int(item["call_bid_depth_lots"])
+                    if item.get("call_bid_depth_lots") is not None
+                    else None
+                ),
+                call_ask_depth_lots=(
+                    int(item["call_ask_depth_lots"])
+                    if item.get("call_ask_depth_lots") is not None
+                    else None
+                ),
+                put_bid_depth_lots=(
+                    int(item["put_bid_depth_lots"])
+                    if item.get("put_bid_depth_lots") is not None
+                    else None
+                ),
+                put_ask_depth_lots=(
+                    int(item["put_ask_depth_lots"])
+                    if item.get("put_ask_depth_lots") is not None
+                    else None
+                ),
             )
         )
 
@@ -525,7 +550,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         expiries = list(exp_resp.get("expiries") or [])
 
         fut_resp = self._call(
-            f"futures_meta:{dec_ist.date().isoformat()}", dec_ist,
+            f"futures_chain:{dec_ist.isoformat()}", dec_ist,
             lambda: self._service.get_futures_chain("NIFTY", exchange="nse_fo"),
         )
         if fut_resp.get("status") != "OK":
@@ -534,11 +559,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         if lot_size <= 0:
             raise KotakAdapterError("Kotak futures metadata returned no usable lot size.")
 
-        spot_resp = self._call(
-            f"spot:{dec_ist.isoformat()}", dec_ist,
-            lambda: self._service.get_futures_chain("NIFTY", exchange="nse_fo"),
-        )
-        spot_val = spot_resp.get("nearest_futures_ltp")
+        spot_val = fut_resp.get("nearest_futures_ltp")
         spot_source = "kotak_neo_nearest_futures_ltp"
         if not spot_val:
             spot_payload = self._call(
@@ -601,6 +622,26 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             pe_depth = pe.get("depth") or {}
             ce_ltp_only = not ce_depth and ce.get("ltp") is not None
             pe_ltp_only = not pe_depth and pe.get("ltp") is not None
+            ce_buy_lots = (
+                int(ce_depth["total_buy_qty_lots"])
+                if ce_depth.get("total_buy_qty_lots") is not None
+                else None
+            )
+            ce_sell_lots = (
+                int(ce_depth["total_sell_qty_lots"])
+                if ce_depth.get("total_sell_qty_lots") is not None
+                else None
+            )
+            pe_buy_lots = (
+                int(pe_depth["total_buy_qty_lots"])
+                if pe_depth.get("total_buy_qty_lots") is not None
+                else None
+            )
+            pe_sell_lots = (
+                int(pe_depth["total_sell_qty_lots"])
+                if pe_depth.get("total_sell_qty_lots") is not None
+                else None
+            )
             strikes.append(
                 {
                     "strike": float(row.get("strike_price") or 0.0),
@@ -612,8 +653,20 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     "put_oi": int(pe.get("oi_current") or 0),
                     "call_volume": int(ce.get("volume") or 0),
                     "put_volume": int(pe.get("volume") or 0),
-                    "call_depth_lots": int(ce_depth.get("total_buy_qty_lots") or 0),
-                    "put_depth_lots": int(pe_depth.get("total_sell_qty_lots") or 0),
+                    "call_depth_lots": int(
+                        ce_depth.get("total_buy_qty_lots")
+                        or ce_depth.get("total_sell_qty_lots")
+                        or 0
+                    ),
+                    "put_depth_lots": int(
+                        pe_depth.get("total_sell_qty_lots")
+                        or pe_depth.get("total_buy_qty_lots")
+                        or 0
+                    ),
+                    "call_bid_depth_lots": ce_buy_lots,
+                    "call_ask_depth_lots": ce_sell_lots,
+                    "put_bid_depth_lots": pe_buy_lots,
+                    "put_ask_depth_lots": pe_sell_lots,
                     # LTP is a last-trade print, not an executable quote: flag it so no leg is
                     # ever priced as executable from LTP alone (depth lots stay 0).
                     "call_ltp_only": ce_ltp_only,

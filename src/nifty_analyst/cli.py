@@ -15,7 +15,7 @@ from nifty_analyst.scrubber import APPROVED_RUN_TIMES_IST, IST, ensure_ist
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nifty-analyst",
-        description="Read-only NIFTY 50 Index Options Research & Strategy Analyst (Implementation Plan v3)",
+        description="Read-only NIFTY 50 Index Options Research & Strategy Analyst (v0.4.0 Single-Pass Persona Edition)",
     )
     parser.add_argument(
         "--decision-time-ist",
@@ -30,12 +30,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--inspect-offline",
         action="store_true",
-        help="Print the full report even if verdict is WAIT or INSUFFICIENT DATA (for Phase 0 gate inspection)",
+        help="Print output even if verdict is WAIT, INSUFFICIENT DATA, or deduplicated (for offline inspection)",
+    )
+    parser.add_argument(
+        "--whatsapp",
+        action="store_true",
+        help="Print the concise mobile-ready WhatsApp digest instead of the full 7-section Markdown report",
     )
     parser.add_argument(
         "--write-report",
         default=None,
         help="Optional file path to write the rendered Markdown report",
+    )
+    parser.add_argument(
+        "--write-whatsapp",
+        default=None,
+        help="Optional file path to write the concise WhatsApp digest",
     )
     parser.add_argument(
         "--write-state-json",
@@ -73,17 +83,21 @@ def main(argv: list[str] | None = None) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(delivery.full_report_markdown, encoding="utf-8")
 
+    if args.write_whatsapp and state.final_output:
+        wa_path = Path(args.write_whatsapp)
+        wa_path.parent.mkdir(parents=True, exist_ok=True)
+        wa_path.write_text(state.final_output.whatsapp_digest, encoding="utf-8")
+
     if args.write_state_json:
         json_path = Path(args.write_state_json)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(state.to_json(indent=2), encoding="utf-8")
 
-    # Alert-only output policy: print report only when verdict == SUGGESTION or --inspect-offline
-    if delivery.user_facing_message:
+    if args.whatsapp:
+        if delivery.whatsapp_digest:
+            print(delivery.whatsapp_digest)
+    elif delivery.user_facing_message:
         print(delivery.user_facing_message)
-    else:
-        # Silent audit log write on WAIT / INSUFFICIENT DATA per Section 10
-        pass
 
     return 0
 

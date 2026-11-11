@@ -158,6 +158,10 @@ class PriceStructureEvidence:
     final_15m_bar_completed: bool
     stripped_forming_bars_count: int
     verified_level_touches: list[VerifiedTouch]
+    rsi_14_1h: float = 50.0
+    atr_14_1h: float = 0.0
+    atr_14_1d: float = 0.0
+    stretch_zscore_1h: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -166,8 +170,12 @@ class VolatilityEvidence:
     atm_iv_by_expiry: dict[str, float]
     constant_maturity_30d_iv: float
     eod_cm30_latest: float | str  # latest completed EOD cm30 (the percentiled quantity); "UNKNOWN" if stale/missing
-    iv_source_label: Literal["LIVE_MID_INFERRED", "EOD_CLOSE_INFERRED",
-        "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY"]
+    iv_source_label: Literal[
+        "LIVE_MID_INFERRED",
+        "EOD_CLOSE_INFERRED",
+        "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY",
+        "LIVE_VARIANCE_INTERPOLATED_CM30",
+    ]
     ivp_30d: float | Literal["UNKNOWN"]
     ivp_90d: float | Literal["UNKNOWN"]
     ivp_252d: float | Literal["UNKNOWN"]
@@ -179,6 +187,10 @@ class VolatilityEvidence:
     wing_curvature: float
     chain_qa_passed: bool
     chain_qa_notes: list[str]
+    term_structure_slope_near_minus_far: float = 0.0
+    term_structure_regime: Literal["CONTANGO", "BACKWARDATION", "FLAT", "SINGLE_EXPIRY"] = (
+        "SINGLE_EXPIRY"
+    )
 
 
 @dataclass(frozen=True)
@@ -191,6 +203,10 @@ class PositioningEvidence:
     put_oi_wall_strike: float
     put_oi_wall_contracts: int
     max_pain_strike: float
+    intraday_spot_change_pts: float | None = None
+    intraday_atm_iv_change_pts: float | None = None
+    intraday_pcr_oi_change: float | None = None
+    prior_intraday_runs_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -271,9 +287,14 @@ class PartARuleCheck:
 
 @dataclass(frozen=True)
 class StatutoryChargesBreakdown:
-    stt_rs: float
+    """Round-trip non-STT execution charges (exchange, SEBI, stamp duty, brokerage, GST).
+
+    STT is intentionally excluded per trader directive so technical analysis and options
+    surface analytics drive strategy selection rather than tax artifacts.
+    """
+
     exchange_txn_charges_rs: float
-    sebi_Charges_rs: float
+    sebi_charges_rs: float
     stamp_duty_rs: float
     gst_rs: float
     brokerage_rs: float
@@ -299,15 +320,8 @@ class CandidateStructure:
     statutory_charges: StatutoryChargesBreakdown
 
     # The Four Distinct Rupee Quantities (Section 4.3, 6.3, 7.4) - NEVER MERGED
-    # 7 Nov 2026 decision: the contractual payoff bound (gross, KNOWN for defined-risk
-    # structures) and the all-in cost-inclusive worst case (fixed charges + PATH-DEPENDENT
-    # exercise taxes) are SEPARATE labeled quantities. The all-in figure is not contractual
-    # and is never certified by the managed-exit plan.
-    contractual_max_loss_rs: float  # gross contractual payoff bound (KNOWN), expiry payoff worst case
+    contractual_max_loss_rs: float  # exact leg-wise piecewise expiry payoff bound
     contractual_max_loss_method: str
-    all_in_worst_case_rs: float  # inf when the expiry-hold exercise-STT tail is unbounded
-    all_in_managed_exit_worst_rs: float  # charges-inclusive managed-exit-path worst case
-    all_in_cost_label: str  # certainty label for the all-in quantities (path-dependent cost model)
     margin_estimate_rs: float
     margin_source: Literal["EXCHANGE_FORMULA_ESTIMATE", "BROKER_CALCULATOR_UNVERIFIED"]
     planned_stop_rs: float
@@ -337,19 +351,41 @@ class CandidateStructure:
     invalidation_justification: str
     management_plan: str
 
-    # Part A & Part B flags
+    # Part A, Part B & technical/options ranking score
     part_a_checks: dict[str, PartARuleCheck]
     part_a_overall_status: RuleStatus
     matches_part_b_style: bool
+    technical_options_score: float = 0.0
 
 
 @dataclass(frozen=True)
 class DebateState:
-    """Optional Phase 2 Bull/Bear debate record."""
+    """TradingAgents-inspired structured adversarial Bull / Bear / Volatility-Regime debate."""
 
     bull_thesis: str
     bear_thesis: str
-    rebuttal_round: str
+    vol_regime_thesis: str = ""
+    rebuttal_round: str = ""
+    dominant_regime: Literal["BULLISH", "BEARISH", "NEUTRAL", "CONTESTED_WAIT"] = "NEUTRAL"
+
+
+@dataclass(frozen=True)
+class RiskTriadState:
+    """TradingAgents-inspired 3-perspective options risk evaluation on Part-A-PASS candidates."""
+
+    convexity_advocate_note: str
+    tail_guardian_note: str
+    neutral_arbiter_note: str
+
+
+@dataclass(frozen=True)
+class ConsolidatorState:
+    """Chief Options Strategist persona synthesizing the debate + risk triad into a final verdict."""
+
+    recommended_structure_id: str  # Certified Part-A-PASS structure_id or "WAIT"
+    conviction: Literal["HIGH", "MODERATE", "SIT_OUT"]
+    final_recommendation_rationale: str
+    whatsapp_digest: str
 
 
 @dataclass(frozen=True)
@@ -369,6 +405,8 @@ class VerifierReport:
     part_a_reverified: bool
     passed_verification: bool
     failure_reasons: list[str]
+    prose_numbers_checked: int = 0
+    uncited_prose_numbers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -386,6 +424,9 @@ class FinalOutput:
     staleness_report: list[str]
     llm_citations: list[LLMClaimCitation]
     verifier_report: VerifierReport
+    whatsapp_digest: str = ""
+    duplicate_alert_suppressed: bool = False
+    payoff_diagram_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -399,6 +440,8 @@ class NiftyOptionsState:
     candidate_structures: list[CandidateStructure]
     debate_state: DebateState | None
     final_output: FinalOutput | None = None
+    risk_triad_state: RiskTriadState | None = None
+    consolidator_state: ConsolidatorState | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

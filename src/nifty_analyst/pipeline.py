@@ -1,12 +1,18 @@
-"""End-to-end deterministic + single-LLM research pipeline (Phase 0 & Phase 1).
+"""End-to-end deterministic + single-pass persona research pipeline (v0.4.0).
 
-Orchestrates Layer 1 (Adapters), Layer 2 (Quant/Detectors/Structures/Part A),
-Layer 3 (Single-LLM Synthesis & Deterministic Post-LLM Verifier), and
-Layer 4 (Alert-Only Output & Immutable Audit Log).
+Orchestrates:
+- Layer 1: Read-Only Adapters (Contract Master, Multi-Expiry Chains, Completed Candles, EOD IVP, Events)
+- Layer 2: Deterministic Quant Engine (Black-76, Chain QA, Variance-Interpolated CM30 IV,
+  RSI/ATR/Stretch Technicals, Symmetric Two-Track Detectors, Multi-Expiry Candidate Structures,
+  and STT-Free Part A Gatekeeper)
+- Layer 3: Single-Pass TradingAgents Persona Synthesis (Bull/Bear/Vol Debate, Risk Triad,
+  Consolidator) & Deterministic Two-Way Citation + Prose Verifier
+- Layer 4: Intraday Deduplication, Payoff Diagram, Alert-Only Output & Immutable Audit Log
 """
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -23,11 +29,12 @@ from nifty_analyst.adapters.eod_vix_events import (
     load_events_calendar,
 )
 from nifty_analyst.adapters.kotak_neo import (
+    ChainSnapshotEnvelope,
     FixtureKotakNeoAdapter,
     KotakAdapterError,
     KotakNeoReadOnlyPort,
+    LiveKotakNeoAdapter,
     ProvisionalSerialRateLimiter,
-    UnverifiedLiveKotakNeoAdapter,
     parse_and_validate_option_chain,
     slice_completed_candles,
 )
@@ -37,7 +44,10 @@ from nifty_analyst.engine.detectors import (
     run_two_track_detectors,
 )
 from nifty_analyst.engine.pricing import (
+    ChainQAResult,
+    LegPayoffSpec,
     compute_time_to_expiry_years,
+    compute_variance_interpolated_cm30_iv,
     run_chain_qa_suite,
 )
 from nifty_analyst.engine.structures import (
@@ -46,11 +56,14 @@ from nifty_analyst.engine.structures import (
     generate_candidate_structures,
 )
 from nifty_analyst.output.audit_log import AuditDeliveryResult, deliver_run_output
+from nifty_analyst.output.intraday_memory import load_same_day_intraday_context
 from nifty_analyst.scrubber import ensure_ist, is_approved_schedule_slot
 from nifty_analyst.state import (
     CandidateStructure,
+    ConsolidatorState,
     ContractContext,
     EventCalendarEvidence,
+    ExpiryMetadata,
     FinalOutput,
     MarketEvidence,
     NiftyOptionsState,
@@ -64,6 +77,7 @@ from nifty_analyst.state import (
     VolatilityEvidence,
 )
 from nifty_analyst.synthesis.llm_node import LLMProvider, build_llm_provider
+from nifty_analyst.synthesis.personas import format_whatsapp_digest
 from nifty_analyst.synthesis.verifier import verify_llm_synthesis
 
 
@@ -98,30 +112,23 @@ def _rank_candidate(
     ivp_90d: float | str,
     primary_direction: str | None,
 ) -> float:
-    """Multi-factor candidate score (Section 6.2(3)): IV-regime fit, risk-reward, PoP, liquidity.
+    """Rank candidates strictly by Part A certification and Technical + Options Surface score.
 
-    Never penalizes a structure for departing from Part B habitual style.
+    Never penalizes a structure for departing from Part B habitual style and includes zero STT bias.
     """
-    if cand.part_a_overall_status == "FAIL":
+    if cand.part_a_overall_status != "PASS":
         return -1e9
 
-    score = 0.0
+    score = cand.technical_options_score
     if primary_direction and cand.direction == primary_direction:
-        score += 40.0
+        score += 10.0
 
-    # IV-regime fit (vega sign vs IVP):
-    # Low IVP (<45) favours positive/neutral vega (debit spreads);
-    # High IVP (>=50) favours negative vega (credit spreads / condors).
     if isinstance(ivp_90d, (int, float)):
         if ivp_90d < 45.0 and not cand.is_net_credit:
-            score += 20.0
+            score += 4.0
         elif ivp_90d >= 50.0 and cand.is_net_credit:
-            score += 20.0
+            score += 4.0
 
-    rr = cand.max_profit_rs / max(1.0, cand.contractual_max_loss_rs)
-    score += min(25.0, rr * 15.0)
-    score += 0.3 * cand.pop_lognormal_expiry
-    score += 0.15 * cand.structure_liquidity_score
     return round(score, 4)
 
 
@@ -224,6 +231,7 @@ def _create_insufficient_data_state(
             passed_verification=False,
             failure_reasons=[reason],
         ),
+        whatsapp_digest=f"*NIFTY Options Desk — INSUFFICIENT DATA*\n• Halt Reason: {reason}",
     )
     return NiftyOptionsState(
         run_metadata=meta,
@@ -242,6 +250,45 @@ def _create_insufficient_data_state(
     )
 
 
+def _maybe_render_payoff_chart(
+    cand: CandidateStructure | None,
+    run_id: str,
+    config: AnalystConfig,
+) -> str:
+    if cand is None or not config.payoff_chart_dir:
+        return ""
+    try:
+        from nifty_analyst.output.payoff_diagram import render_payoff_diagram
+
+        out_dir = Path(config.payoff_chart_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / f"{run_id}_{cand.structure_id}.png"
+        slip = config.slippage_buffer_points_per_leg
+        specs = [
+            LegPayoffSpec(
+                strike=l.strike,
+                option_type=l.option_type,
+                side=l.side,
+                ratio=l.ratio,
+                executable_entry_price=(
+                    min(l.bid, max(0.05, l.bid - slip)) if l.side == "SHORT" else (l.ask + slip)
+                ),
+            )
+            for l in cand.legs
+        ]
+        render_payoff_diagram(
+            legs=specs,
+            lot_size=cand.lot_size,
+            lots=cand.lots,
+            statutory_charges_rs=cand.statutory_charges.total_charges_rs,
+            title=f"{cand.structure_id} ({cand.structure_type})",
+            out_path=str(out_file),
+        )
+        return str(out_file)
+    except Exception:
+        return ""
+
+
 def run_analyst_pipeline(
     decision_dt_ist: dt.datetime,
     config: AnalystConfig,
@@ -251,7 +298,7 @@ def run_analyst_pipeline(
     target_expiry_override: str | None = None,
     force_render_for_inspection: bool = False,
 ) -> tuple[NiftyOptionsState, AuditDeliveryResult]:
-    """Execute the full Phase 0 + Phase 1 NIFTY 50 Options Research Analyst pipeline."""
+    """Execute the full NIFTY 50 Options Research Analyst pipeline (single-pass, zero multicall)."""
     dec_ist = ensure_ist(decision_dt_ist)
     scrubber = config.build_scrubber()
     run_id = f"run_{dec_ist.strftime('%Y%m%d_%H%M%S')}_{config.config_hash()[:6]}"
@@ -261,24 +308,30 @@ def run_analyst_pipeline(
         portfolio_cap_rs=config.portfolio_summed_stop_cap_rs,
     )
 
-    fixtures_path = Path(config.fixtures_dir)
-    if broker_adapter is None:
-        limiter = ProvisionalSerialRateLimiter(
-            min_interval_seconds=config.kotak_min_request_interval_seconds
-        )
-        if config.mode == "OFFLINE":
-            broker_adapter = FixtureKotakNeoAdapter(
-                fixtures_dir=fixtures_path,
-                rate_limiter=limiter,
-                enforce_schedule_in_live_mode=False,
-            )
-        else:
-            broker_adapter = UnverifiedLiveKotakNeoAdapter(rate_limiter=limiter)
-
     try:
-        holidays, holiday_descs = load_nse_holiday_calendar(
-            fixtures_path / "nse_holidays_2026.json"
-        )
+        holidays, holiday_descs = load_nse_holiday_calendar(config.resolved_holidays_path())
+        if broker_adapter is None:
+            if config.mode == "OFFLINE":
+                broker_adapter = FixtureKotakNeoAdapter(
+                    fixtures_dir=Path(config.fixtures_dir),
+                    rate_limiter=ProvisionalSerialRateLimiter(min_interval_seconds=0.0),
+                    enforce_schedule_in_live_mode=False,
+                )
+            else:
+                live_limiter = ProvisionalSerialRateLimiter(
+                    min_interval_seconds=config.kotak_min_request_interval_seconds
+                )
+                trading_cal = {
+                    "holiday_dates": frozenset(d.isoformat() for d in holidays),
+                    "special_sessions": config.special_sessions,
+                }
+                broker_adapter = LiveKotakNeoAdapter(
+                    kotak_api_root=config.kotak_api_root or None,
+                    rate_limiter=live_limiter,
+                    enforce_schedule_in_live_mode=True,
+                    trading_calendar=trading_cal,  # type: ignore[arg-type]
+                )
+
         raw_master = broker_adapter.fetch_contract_master_raw(dec_ist)
         expected_cal_expiries = raw_master.get("expected_calendar_expiries")
         contract_ctx = parse_contract_master(
@@ -325,34 +378,107 @@ def run_analyst_pipeline(
         )
         return state, delivery
 
-    # Select target expiry (prefer nearest expiry with DTE >= 2 sessions unless overridden)
-    target_expiry_meta = contract_ctx.active_expiries[0]
+    # Select anchor expiry (prefer nearest expiry with DTE >= 2 sessions unless overridden)
+    anchor_expiry_meta = contract_ctx.active_expiries[0]
     if target_expiry_override:
         for exp in contract_ctx.active_expiries:
             if exp.expiry_date == target_expiry_override:
-                target_expiry_meta = exp
+                anchor_expiry_meta = exp
                 break
+        expiries_to_evaluate = [anchor_expiry_meta]
     else:
         for exp in contract_ctx.active_expiries:
             if exp.dte_trading_sessions >= 2:
-                target_expiry_meta = exp
+                anchor_expiry_meta = exp
                 break
+        if config.evaluate_all_active_expiries:
+            expiries_to_evaluate = [
+                exp for exp in contract_ctx.active_expiries if exp.dte_trading_sessions >= 1
+            ] or [anchor_expiry_meta]
+        else:
+            expiries_to_evaluate = [anchor_expiry_meta]
+
+    # Ensure anchor expiry is fetched & validated first
+    expiries_ordered = [anchor_expiry_meta] + [
+        e for e in expiries_to_evaluate if e.expiry_date != anchor_expiry_meta.expiry_date
+    ]
+
+    evaluated_chains: list[tuple[ExpiryMetadata, ChainSnapshotEnvelope, ChainQAResult, float, float]] = []
+    spot_val = contract_ctx.spot.value
 
     try:
-        raw_chain = broker_adapter.fetch_option_chain_raw(
-            target_expiry_meta.expiry_date, dec_ist
-        )
-        chain_env = parse_and_validate_option_chain(
-            raw_chain=raw_chain,
-            expiry_date=target_expiry_meta.expiry_date,
-            decision_dt_ist=dec_ist,
-            max_staleness_seconds=config.max_quote_staleness_seconds,
-        )
         raw_candles = broker_adapter.fetch_index_candles_raw(dec_ist)
         completed_1d, completed_1h, completed_15m, stripped_bars = slice_completed_candles(
             raw_candles, dec_ist
         )
         vix_datum = broker_adapter.fetch_india_vix_raw(dec_ist)
+
+        for idx_exp, exp_meta in enumerate(expiries_ordered):
+            is_anchor = idx_exp == 0
+            try:
+                raw_chain = broker_adapter.fetch_option_chain_raw(exp_meta.expiry_date, dec_ist)
+                chain_env = parse_and_validate_option_chain(
+                    raw_chain=raw_chain,
+                    expiry_date=exp_meta.expiry_date,
+                    decision_dt_ist=dec_ist,
+                    max_staleness_seconds=config.max_quote_staleness_seconds,
+                )
+            except KotakAdapterError:
+                if is_anchor:
+                    raise
+                continue
+
+            if chain_env.any_stale:
+                if is_anchor:
+                    state = _create_insufficient_data_state(
+                        run_id=run_id,
+                        dec_ist=dec_ist,
+                        config=config,
+                        portfolio_state=portfolio_state,
+                        reason=(
+                            f"Active option quotes for expiry {exp_meta.expiry_date} exceed "
+                            f"{config.max_quote_staleness_seconds}s staleness bound at strikes: {chain_env.stale_strikes}."
+                        ),
+                        contract_context=contract_ctx,
+                    )
+                    delivery = deliver_run_output(
+                        state,
+                        config.audit_log_path,
+                        scrubber=scrubber,
+                        force_render_for_inspection=force_render_for_inspection,
+                    )
+                    return state, delivery
+                continue
+
+            t_yrs = compute_time_to_expiry_years(dec_ist, exp_meta.expiry_date)
+            qa_res = run_chain_qa_suite(
+                spot=spot_val,
+                quotes=chain_env.quotes,
+                time_to_expiry_years=t_yrs,
+                risk_free_rate=config.risk_free_rate_annual,
+            )
+            if not qa_res.passed:
+                if is_anchor:
+                    state = _create_insufficient_data_state(
+                        run_id=run_id,
+                        dec_ist=dec_ist,
+                        config=config,
+                        portfolio_state=portfolio_state,
+                        reason=f"Chain QA aborted ({qa_res.failure_code}): {'; '.join(qa_res.notes)}",
+                        contract_context=contract_ctx,
+                    )
+                    delivery = deliver_run_output(
+                        state,
+                        config.audit_log_path,
+                        scrubber=scrubber,
+                        force_render_for_inspection=force_render_for_inspection,
+                    )
+                    return state, delivery
+                continue
+
+            exp_atm_iv = round(0.5 * (qa_res.atm_call_iv + qa_res.atm_put_iv), 6)
+            evaluated_chains.append((exp_meta, chain_env, qa_res, t_yrs, exp_atm_iv))
+
     except KotakAdapterError as exc:
         state = _create_insufficient_data_state(
             run_id=run_id,
@@ -370,100 +496,77 @@ def run_analyst_pipeline(
         )
         return state, delivery
 
-    if chain_env.any_stale:
-        state = _create_insufficient_data_state(
-            run_id=run_id,
-            dec_ist=dec_ist,
-            config=config,
-            portfolio_state=portfolio_state,
-            reason=(
-                f"Active option quotes for expiry {target_expiry_meta.expiry_date} exceed "
-                f"{config.max_quote_staleness_seconds}s staleness bound at strikes: {chain_env.stale_strikes}."
-            ),
-            contract_context=contract_ctx,
-        )
-        delivery = deliver_run_output(
-            state,
-            config.audit_log_path,
-            scrubber=scrubber,
-            force_render_for_inspection=force_render_for_inspection,
-        )
-        return state, delivery
-
-    spot_val = contract_ctx.spot.value
-    t_years = compute_time_to_expiry_years(dec_ist, target_expiry_meta.expiry_date)
-    qa_result = run_chain_qa_suite(
-        spot=spot_val,
-        quotes=chain_env.quotes,
-        time_to_expiry_years=t_years,
-        risk_free_rate=config.risk_free_rate_annual,
+    anchor_meta, anchor_chain_env, anchor_qa, anchor_t_yrs, anchor_atm_iv = evaluated_chains[0]
+    atm_iv_by_expiry = {m.expiry_date: iv for (m, _, _, _, iv) in evaluated_chains}
+    t_and_ivs = [(t_y, iv) for (_, _, _, t_y, iv) in evaluated_chains]
+    cm30_iv, ts_slope, ts_regime = compute_variance_interpolated_cm30_iv(t_and_ivs, target_days=30.0)
+    iv_source_lbl = (
+        "LIVE_VARIANCE_INTERPOLATED_CM30"
+        if len(evaluated_chains) >= 2
+        else "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY"
     )
 
-    if not qa_result.passed:
-        state = _create_insufficient_data_state(
-            run_id=run_id,
-            dec_ist=dec_ist,
-            config=config,
-            portfolio_state=portfolio_state,
-            reason=f"Chain QA aborted ({qa_result.failure_code}): {'; '.join(qa_result.notes)}",
-            contract_context=contract_ctx,
-        )
-        delivery = deliver_run_output(
-            state,
-            config.audit_log_path,
-            scrubber=scrubber,
-            force_render_for_inspection=force_render_for_inspection,
-        )
-        return state, delivery
-
-    atm_iv = round(0.5 * (qa_result.atm_call_iv + qa_result.atm_put_iv), 6)
-    # Basis policy: the percentiled quantity is the LATEST COMPLETED EOD cm30 at-forward
-    # IV from the validated official-settlement series (current_cm30_iv=None -> adapter
-    # uses its own latest clamped record). The live intraday spot-ATM IV below is a
-    # different basis (intraday mid, nearest listed expiry) and is NEVER percentiled.
     eod_vol_summary = load_eod_volatility_history(
-        eod_archive_path=fixtures_path / "nse_eod_volatility_history.json",
+        eod_archive_path=config.resolved_eod_archive_path(),
         decision_dt_ist=dec_ist,
         current_cm30_iv=None,
         holidays=holidays,
         risk_free_rate=config.risk_free_rate_annual,
-        special_sessions=getattr(config, "special_sessions", None),
+        special_sessions=config.special_sessions,
     )
     eod_cm30_latest = (
         round(eod_vol_summary.records[-1].constant_maturity_30d_iv, 6)
-        if eod_vol_summary.records else "UNKNOWN"
+        if eod_vol_summary.records
+        else "UNKNOWN"
     )
     skew_25d, wing_curv = compute_skew_and_curvature(
-        quotes=chain_env.quotes,
-        implied_forward=qa_result.implied_forward,
-        atm_iv=atm_iv,
-        time_to_expiry_years=t_years,
+        quotes=anchor_chain_env.quotes,
+        implied_forward=anchor_qa.implied_forward,
+        atm_iv=anchor_atm_iv,
+        time_to_expiry_years=anchor_t_yrs,
         risk_free_rate=config.risk_free_rate_annual,
     )
 
     vol_evidence = VolatilityEvidence(
         india_vix=vix_datum,
-        atm_iv_by_expiry={target_expiry_meta.expiry_date: atm_iv},
-        constant_maturity_30d_iv=atm_iv,
+        atm_iv_by_expiry=atm_iv_by_expiry,
+        constant_maturity_30d_iv=cm30_iv,
         eod_cm30_latest=eod_cm30_latest,
-        iv_source_label="LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY",
+        iv_source_label=iv_source_lbl,
         ivp_30d=eod_vol_summary.ivp_30d,
         ivp_90d=eod_vol_summary.ivp_90d,
         ivp_252d=eod_vol_summary.ivp_252d,
         iv_history_sessions_count=len(eod_vol_summary.records),
         iv_history_gaps_flagged=eod_vol_summary.continuity_gaps_flagged,
         realized_vol_20d=eod_vol_summary.realized_vol_20d,
-        iv_rv_spread=round(atm_iv - eod_vol_summary.realized_vol_20d, 4),
+        iv_rv_spread=round(cm30_iv - eod_vol_summary.realized_vol_20d, 4),
         skew_25d_put_minus_call=skew_25d,
         wing_curvature=wing_curv,
-        chain_qa_passed=qa_result.passed,
-        chain_qa_notes=qa_result.notes,
+        chain_qa_passed=anchor_qa.passed,
+        chain_qa_notes=anchor_qa.notes,
+        term_structure_slope_near_minus_far=ts_slope,
+        term_structure_regime=ts_regime,
     )
 
-    pos_evidence = compute_positioning_evidence(
-        expiry_date=target_expiry_meta.expiry_date,
-        quotes=chain_env.quotes,
+    pos_raw = compute_positioning_evidence(
+        expiry_date=anchor_meta.expiry_date,
+        quotes=anchor_chain_env.quotes,
     )
+    intraday_ctx = load_same_day_intraday_context(
+        audit_log_path=config.audit_log_path,
+        decision_dt_ist=dec_ist,
+        current_spot=spot_val,
+        current_cm30_iv=cm30_iv,
+        current_pcr_oi=pos_raw.pcr_oi,
+    )
+    pos_evidence = dataclasses.replace(
+        pos_raw,
+        intraday_spot_change_pts=intraday_ctx.intraday_spot_change_pts,
+        intraday_atm_iv_change_pts=intraday_ctx.intraday_atm_iv_change_pts,
+        intraday_pcr_oi_change=intraday_ctx.intraday_pcr_oi_change,
+        prior_intraday_runs_count=intraday_ctx.prior_intraday_runs_count,
+    )
+
     price_structure = analyze_price_structure(
         completed_1d=completed_1d,
         completed_1h=completed_1h,
@@ -475,7 +578,7 @@ def run_analyst_pipeline(
         },
     )
     event_cal = load_events_calendar(
-        events_file_path=fixtures_path / "vix_and_events.json",
+        events_file_path=config.resolved_events_path(),
         decision_dt_ist=dec_ist,
         max_expiry_date_str=contract_ctx.active_expiries[-1].expiry_date,
         max_calendar_age_days=config.max_event_calendar_age_days,
@@ -487,53 +590,59 @@ def run_analyst_pipeline(
         positioning=pos_evidence,
     )
 
-    candidates = generate_candidate_structures(
-        expiry=target_expiry_meta,
-        quotes=chain_env.quotes,
-        stale_strikes=chain_env.stale_strikes,
-        spot=spot_val,
-        implied_forward=qa_result.implied_forward,
-        atm_iv=atm_iv,
-        time_to_expiry_years=t_years,
-        empirical_daily_log_returns=eod_vol_summary.empirical_daily_log_returns,
-        triggered_detectors=detectors,
-        portfolio_state=portfolio_state,
-        price_structure=price_structure,
-        volatility=vol_evidence,
-        config=config,
-    )
+    candidates: list[CandidateStructure] = []
+    for exp_meta, chain_env, qa_res, t_yrs, exp_atm_iv in evaluated_chains:
+        exp_pos = (
+            pos_evidence
+            if exp_meta.expiry_date == anchor_meta.expiry_date
+            else compute_positioning_evidence(exp_meta.expiry_date, chain_env.quotes)
+        )
+        candidates.extend(
+            generate_candidate_structures(
+                expiry=exp_meta,
+                quotes=chain_env.quotes,
+                stale_strikes=chain_env.stale_strikes,
+                spot=spot_val,
+                implied_forward=qa_res.implied_forward,
+                atm_iv=exp_atm_iv,
+                time_to_expiry_years=t_yrs,
+                empirical_daily_log_returns=eod_vol_summary.empirical_daily_log_returns,
+                triggered_detectors=detectors,
+                portfolio_state=portfolio_state,
+                price_structure=price_structure,
+                volatility=vol_evidence,
+                config=config,
+                positioning=exp_pos,
+            )
+        )
 
-    # Determine primary direction from confirmed quant regime detectors
     confirmed_quant_dirs = [
         d.direction for d in detectors if d.confirmation_status == "CONFIRMED_QUANT_REGIME"
     ]
     primary_dir = confirmed_quant_dirs[0] if confirmed_quant_dirs else None
 
-    # Primary must be certifiable: Part A overall PASS only. UNKNOWN-bound candidates
-    # (e.g. expiry-hold exercise-STT tail) stay research-only in the Section 6 comparison
-    # and can never become the primary proposal or trigger a SUGGESTION.
-    eligible = [
-        c for c in candidates if c.part_a_overall_status == "PASS"
-    ]
+    eligible = [c for c in candidates if c.part_a_overall_status == "PASS"]
     eligible.sort(
         key=lambda c: _rank_candidate(c, vol_evidence.ivp_90d, primary_dir),
         reverse=True,
     )
 
-    selected_primary: CandidateStructure | None = None
-    if eligible and detectors:
-        selected_primary = eligible[0]
-
+    selected_primary: CandidateStructure | None = eligible[0] if (eligible and detectors) else None
     alternatives = [
-        c for c in candidates if selected_primary is None or c.structure_id != selected_primary.structure_id
+        c
+        for c in candidates
+        if selected_primary is None or c.structure_id != selected_primary.structure_id
     ]
 
+    earliest_q = min(env.earliest_quote_ist for (_, env, _, _, _) in evaluated_chains)
+    latest_q = max(env.latest_quote_ist for (_, env, _, _, _) in evaluated_chains)
     data_hash_payload = json.dumps(
         {
             "spot": contract_ctx.spot.value,
             "spot_as_of": contract_ctx.spot.as_of_ist,
-            "chain_earliest": chain_env.earliest_quote_ist,
-            "chain_latest": chain_env.latest_quote_ist,
+            "chain_earliest": earliest_q,
+            "chain_latest": latest_q,
+            "expiries_evaluated": [m.expiry_date for (m, _, _, _, _) in evaluated_chains],
             "eod_sessions": len(eod_vol_summary.records),
         },
         sort_keys=True,
@@ -548,7 +657,11 @@ def run_analyst_pipeline(
         data_version_hash=data_version_hash,
         model_ids=[config.llm_model_id],
         config_hash=config.config_hash(),
-        scheduled_slot_approved=is_approved_schedule_slot(dec_ist),
+        scheduled_slot_approved=is_approved_schedule_slot(
+            dec_ist,
+            holiday_dates=frozenset(d.isoformat() for d in holidays),
+            special_sessions=config.special_sessions,
+        ),
     )
 
     pre_llm_state = NiftyOptionsState(
@@ -575,25 +688,45 @@ def run_analyst_pipeline(
         alternatives=alternatives,
     )
 
+    # Honour Consolidator's selection (must be 'WAIT' or a certified Part-A-PASS candidate)
+    consolidator_rec_id: str | None = None
+    if llm_resp.consolidator_state is not None:
+        consolidator_rec_id = llm_resp.consolidator_state.recommended_structure_id
+        if consolidator_rec_id == "WAIT":
+            selected_primary = None
+        else:
+            cand_by_id = {c.structure_id: c for c in candidates}
+            if consolidator_rec_id in cand_by_id:
+                selected_primary = cand_by_id[consolidator_rec_id]
+
+    prose_blocks: list[str] = [llm_resp.reasoning_summary]
+    if llm_resp.debate_state is not None:
+        prose_blocks.extend(
+            [
+                llm_resp.debate_state.bull_thesis,
+                llm_resp.debate_state.bear_thesis,
+                llm_resp.debate_state.vol_regime_thesis,
+            ]
+        )
+    if llm_resp.consolidator_state is not None:
+        prose_blocks.append(llm_resp.consolidator_state.final_recommendation_rationale)
+
     verified_citations, verifier_report = verify_llm_synthesis(
         state=pre_llm_state,
         raw_citations=llm_resp.citations,
         selected_primary=selected_primary,
+        prose_texts=prose_blocks,
+        consolidator_recommended_id=consolidator_rec_id,
     )
 
-    # Chosen verified IVP lookbacks: 30 and 90 sessions (explicit). ivp_252d is
-    # intentionally NOT in this gate: a 252-session IVP is unavailable while history
-    # holds fewer than 252 verified sessions, and unavailability by history length
-    # must not block candidates when the configured 30/90 lookbacks are verified.
     ivp_unknown = (
         vol_evidence.ivp_30d == "UNKNOWN" or vol_evidence.ivp_90d == "UNKNOWN"
     )
-    # A SUGGESTION requires a certified primary: Part A overall PASS. Rule 4 gates the
-    # KNOWN gross contractual payoff bound against the Rs 10,000 ceiling (7 Nov 2026
-    # decision); an unbounded all-in expiry-hold path is disclosed via the all-in cost
-    # label, never gated UNKNOWN and never a strategy ban. A primary that FAILs any
-    # Part A rule cannot qualify; the run stays WAIT with candidates visible
-    # research-only in Section 6.
+    any_fetch_time_unverified = any(
+        "FETCH_TIME_NOT_EXCHANGE" in env.source_verification_tag
+        for (_, env, _, _, _) in evaluated_chains
+    )
+
     if (
         selected_primary is not None
         and verifier_report.passed_verification
@@ -604,16 +737,29 @@ def run_analyst_pipeline(
         verdict = "WAIT"
         selected_primary = None
 
+    alternatives = [
+        c
+        for c in candidates
+        if selected_primary is None or c.structure_id != selected_primary.structure_id
+    ]
+
     is_live_ready = (
         verdict == "SUGGESTION"
         and not ivp_unknown
+        and not any_fetch_time_unverified
         and selected_primary is not None
         and selected_primary.part_a_overall_status == "PASS"
     )
     research_only_reason = ""
     if not is_live_ready:
         if ivp_unknown:
-            research_only_reason = "IVP is UNKNOWN; output is labelled research-only per Section 4.2 & 5A.8."
+            research_only_reason = (
+                "IVP is UNKNOWN; output is labelled research-only per Section 4.2 & 5A.8."
+            )
+        elif any_fetch_time_unverified:
+            research_only_reason = (
+                "Option chain quote timestamps use FETCH_TIME_NOT_EXCHANGE (unverified exchange quote as-of)."
+            )
         elif verdict != "SUGGESTION":
             research_only_reason = f"Verdict is {verdict}."
         elif selected_primary is not None:
@@ -621,9 +767,51 @@ def run_analyst_pipeline(
                 f"Primary candidate Part A status is {selected_primary.part_a_overall_status}."
             )
 
+    duplicate_suppressed = bool(
+        config.deduplicate_intraday_alerts
+        and verdict == "SUGGESTION"
+        and is_live_ready
+        and selected_primary is not None
+        and selected_primary.structure_id in intraday_ctx.alerted_structure_ids_today
+    )
+
+    # Ensure Consolidator state & WhatsApp digest reflect final post-verifier verdict
+    final_consolidator = llm_resp.consolidator_state
+    if llm_resp.debate_state is not None:
+        deterministic_wa = format_whatsapp_digest(
+            state=pre_llm_state,
+            selected=selected_primary,
+            debate=llm_resp.debate_state,
+            consolidator_conviction=(
+                final_consolidator.conviction
+                if (final_consolidator and verdict == "SUGGESTION")
+                else "SIT_OUT"
+            ),
+            is_live_ready=is_live_ready,
+        )
+        if final_consolidator is not None:
+            if verdict != "SUGGESTION":
+                final_consolidator = ConsolidatorState(
+                    recommended_structure_id="WAIT",
+                    conviction="SIT_OUT",
+                    final_recommendation_rationale=final_consolidator.final_recommendation_rationale,
+                    whatsapp_digest=deterministic_wa,
+                )
+            elif not final_consolidator.whatsapp_digest:
+                final_consolidator = dataclasses.replace(
+                    final_consolidator, whatsapp_digest=deterministic_wa
+                )
+        whatsapp_digest = (
+            final_consolidator.whatsapp_digest if final_consolidator else deterministic_wa
+        )
+    else:
+        whatsapp_digest = ""
+
+    chart_path = _maybe_render_payoff_chart(selected_primary, run_id, config)
+
     staleness_notes = [
         f"Spot as-of {contract_ctx.spot.as_of_ist} (stale={contract_ctx.spot.is_stale})",
-        f"Chain quotes [{chain_env.earliest_quote_ist} .. {chain_env.latest_quote_ist}] (any_stale={chain_env.any_stale})",
+        f"Chain quotes across {len(evaluated_chains)} expiry(s) [{earliest_q} .. {latest_q}] (any_stale=False)",
     ]
     if event_cal.is_calendar_stale_warning:
         staleness_notes.append(
@@ -646,6 +834,9 @@ def run_analyst_pipeline(
         staleness_report=staleness_notes,
         llm_citations=verified_citations,
         verifier_report=verifier_report,
+        whatsapp_digest=whatsapp_digest,
+        duplicate_alert_suppressed=duplicate_suppressed,
+        payoff_diagram_path=chart_path,
     )
 
     completed_state = NiftyOptionsState(
@@ -654,8 +845,10 @@ def run_analyst_pipeline(
         portfolio_exposure_state=portfolio_state,
         market_evidence=pre_llm_state.market_evidence,
         candidate_structures=candidates,
-        debate_state=None,
+        debate_state=llm_resp.debate_state,
         final_output=final_output,
+        risk_triad_state=llm_resp.risk_triad_state,
+        consolidator_state=final_consolidator,
     )
 
     delivery = deliver_run_output(

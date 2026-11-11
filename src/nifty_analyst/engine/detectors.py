@@ -1,12 +1,13 @@
-"""Completed-candle signal hygiene and Two-Track Setup Detector Registry (Section 5).
+"""Completed-candle signal hygiene, technical indicators, and Two-Track Setup Detector Registry (Section 5).
 
 - Track 1 (PART_C_HISTORICAL): tagged HISTORICAL_REFERENCE_UNCONFIRMED; context only, never gates.
-- Track 2 (NOVEL_QUANT): regime-driven detectors (volatility compression/expansion, high-IV range,
-  skew dislocation, and candidate stretch metrics tagged DEFINITION_OPEN).
+- Track 2 (NOVEL_QUANT): symmetric Bullish, Bearish, Neutral, and Skew regime detectors
+  (CONFIRMED_QUANT_REGIME) plus candidate stretch metrics tagged DEFINITION_OPEN.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Literal, Sequence
 
 from nifty_analyst.state import (
@@ -34,6 +35,64 @@ def compute_ema(values: Sequence[float], period: int) -> float:
     for v in values[1:]:
         ema = v * k + ema * (1.0 - k)
     return ema
+
+
+def compute_rsi_14(closes: Sequence[float], period: int = 14) -> float:
+    """Compute Wilder's 14-period RSI on completed candle closes."""
+    if len(closes) < 2:
+        return 50.0
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    seed_len = min(period, len(deltas))
+    gains = [max(0.0, d) for d in deltas[:seed_len]]
+    losses = [max(0.0, -d) for d in deltas[:seed_len]]
+    avg_gain = sum(gains) / float(seed_len)
+    avg_loss = sum(losses) / float(seed_len)
+
+    for d in deltas[seed_len:]:
+        gain = max(0.0, d)
+        loss = max(0.0, -d)
+        avg_gain = (avg_gain * (period - 1) + gain) / float(period)
+        avg_loss = (avg_loss * (period - 1) + loss) / float(period)
+
+    if avg_loss <= 1e-9:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 2)
+
+
+def compute_atr_14(bars: Sequence[CandleBar], period: int = 14) -> float:
+    """Compute Wilder's 14-period Average True Range (ATR) in index points on completed bars."""
+    if not bars:
+        return 0.0
+    true_ranges: list[float] = [bars[0].high - bars[0].low]
+    for i in range(1, len(bars)):
+        prev_close = bars[i - 1].close
+        b = bars[i]
+        tr = max(b.high - b.low, abs(b.high - prev_close), abs(b.low - prev_close))
+        true_ranges.append(tr)
+
+    seed_len = min(period, len(true_ranges))
+    atr = sum(true_ranges[:seed_len]) / float(seed_len)
+    for tr in true_ranges[seed_len:]:
+        atr = (atr * (period - 1) + tr) / float(period)
+    return round(atr, 2)
+
+
+def compute_stretch_zscore(
+    reference_price: float,
+    closes: Sequence[float],
+    period: int = 20,
+) -> float:
+    """Compute standardized distance `(price - SMA_20) / stdev_20` on completed bars."""
+    if len(closes) < 3:
+        return 0.0
+    window = closes[-period:] if len(closes) >= period else closes
+    mean_v = sum(window) / float(len(window))
+    var_v = sum((x - mean_v) ** 2 for x in window) / float(max(1, len(window) - 1))
+    sd = math.sqrt(var_v)
+    if sd <= 1e-6:
+        return 0.0
+    return round((reference_price - mean_v) / sd, 2)
 
 
 def verify_geometric_touch(
@@ -82,10 +141,16 @@ def analyze_price_structure(
     stripped_forming_bars_count: int,
     extra_reference_levels: dict[str, float] | None = None,
 ) -> PriceStructureEvidence:
-    """Analyze completed 1D and 1H bars for trend state, HH+HL repair, MAs, and verified touches."""
+    """Analyze completed 1D and 1H bars for trend state, HH+HL repair, MAs, RSI, ATR, and touches."""
     closes_1h = [b.close for b in completed_1h]
     ma20_1h = round(compute_sma(closes_1h, 20), 2) if closes_1h else 0.0
     ema50_1h = round(compute_ema(closes_1h, 50), 2) if closes_1h else 0.0
+    rsi_14_1h = compute_rsi_14(closes_1h, 14)
+    atr_14_1h = compute_atr_14(completed_1h, 14)
+    atr_14_1d = compute_atr_14(completed_1d, 14)
+    stretch_z_1h = (
+        compute_stretch_zscore(closes_1h[-1], closes_1h, 20) if closes_1h else 0.0
+    )
 
     # Evaluate 1D trend state and 8 Oct 2026 downtrend repair rule (daily higher high + higher low)
     trend_1d: Literal["UPTREND", "DOWNTREND", "RANGE", "DOWNTREND_REPAIRED_HH_HL"] = "RANGE"
@@ -146,6 +211,10 @@ def analyze_price_structure(
         final_15m_bar_completed=completed_final_15m is not None,
         stripped_forming_bars_count=stripped_forming_bars_count,
         verified_level_touches=verified_touches,
+        rsi_14_1h=rsi_14_1h,
+        atr_14_1h=atr_14_1h,
+        atr_14_1d=atr_14_1d,
+        stretch_zscore_1h=stretch_z_1h,
     )
 
 
@@ -264,14 +333,18 @@ def run_two_track_detectors(
         )
 
     # -------------------------------------------------------------------------
-    # TRACK 2: Novel & Regime-Driven Detectors (First-Class Citizens)
+    # TRACK 2: Symmetric Novel & Regime-Driven Detectors (First-Class Citizens)
     # -------------------------------------------------------------------------
     ivp_90 = volatility.ivp_90d
     numeric_ivp = float(ivp_90) if isinstance(ivp_90, (int, float)) else 50.0
 
-    # 2A: High-IV Regime + Verified Support/OI Wall Defense (Favours Credit or Neutral Structures)
+    # 2A: High-IV Bullish Regime + Put OI Wall Support
     if numeric_ivp >= 50.0 and price_structure.trend_1d_state in ("UPTREND", "DOWNTREND_REPAIRED_HH_HL"):
-        inv_level = float(positioning.put_oi_wall_strike) if positioning.put_oi_wall_strike < spot else (spot - 200.0)
+        inv_level = (
+            float(positioning.put_oi_wall_strike)
+            if positioning.put_oi_wall_strike < spot
+            else (spot - 200.0)
+        )
         detectors.append(
             TriggeredDetector(
                 detector_id="NOVEL_HIGH_IV_BULLISH_PUT_WALL",
@@ -285,9 +358,9 @@ def run_two_track_detectors(
                     f"Completed daily close below Put OI Wall ({round(inv_level, 2)}) invalidates bullish support."
                 ),
                 summary=(
-                    f"90d IVP is {ivp_90} with 1D trend {price_structure.trend_1d_state} and "
-                    f"Put OI wall at {positioning.put_oi_wall_strike} ({positioning.put_oi_wall_contracts} contracts). "
-                    f"Compares bullish credit spreads, debit spreads, and butterflies side by side."
+                    f"90d IVP is {ivp_90} with 1D trend {price_structure.trend_1d_state}, "
+                    f"1H RSI={price_structure.rsi_14_1h:.1f}, and Put OI wall at {positioning.put_oi_wall_strike} "
+                    f"({positioning.put_oi_wall_contracts} contracts). Favours short-vega bullish credit or butterfly structures."
                 ),
                 evidence_fields_cited=[
                     "market_evidence.volatility_state.ivp_90d",
@@ -297,13 +370,13 @@ def run_two_track_detectors(
             )
         )
 
-    # 2B: Volatility Compression Setup (Low IVP -> Favours Debit Structures)
+    # 2B: Low-IV Bullish Compression Regime
     if numeric_ivp < 50.0 and price_structure.trend_1d_state in ("UPTREND", "DOWNTREND_REPAIRED_HH_HL"):
         inv_level = price_structure.ema50_1h if price_structure.ema50_1h < spot else (spot - 150.0)
         detectors.append(
             TriggeredDetector(
                 detector_id="NOVEL_LOW_IV_COMPRESSION_BULLISH",
-                detector_name="Low-IVP Volatility Compression Directional Setup (Debit-Favourable)",
+                detector_name="Low-IVP Volatility Compression Bullish Setup (Debit-Favourable)",
                 track="NOVEL_QUANT",
                 confirmation_status="CONFIRMED_QUANT_REGIME",
                 direction="BULLISH",
@@ -313,8 +386,8 @@ def run_two_track_detectors(
                     f"Completed daily close below {round(inv_level, 2)} negates upside expansion thesis."
                 ),
                 summary=(
-                    f"90d IVP is compressed ({ivp_90}) with positive trend structure; long-vega debit structures "
-                    f"(Bull Call Spread) avoid short-vega expansion risk."
+                    f"90d IVP is compressed ({ivp_90}) with positive trend structure (1H RSI={price_structure.rsi_14_1h:.1f}); "
+                    f"long-vega debit structures (Bull Call Spread) avoid short-vega expansion risk."
                 ),
                 evidence_fields_cited=[
                     "market_evidence.volatility_state.ivp_90d",
@@ -323,7 +396,69 @@ def run_two_track_detectors(
             )
         )
 
-    # 2C: High-IV Range-Bound OI-Bracketed Regime (Favours Iron Condor / Butterfly)
+    # 2C: High-IV Bearish Regime + Call OI Wall Resistance (Symmetric Bearish Detector)
+    if numeric_ivp >= 50.0 and price_structure.trend_1d_state == "DOWNTREND":
+        inv_level = (
+            float(positioning.call_oi_wall_strike)
+            if positioning.call_oi_wall_strike > spot
+            else (last_1d.high if last_1d and last_1d.high > spot else spot + 200.0)
+        )
+        detectors.append(
+            TriggeredDetector(
+                detector_id="NOVEL_HIGH_IV_BEARISH_CALL_WALL",
+                detector_name="Elevated IVP + Downtrend Below Call OI Wall",
+                track="NOVEL_QUANT",
+                confirmation_status="CONFIRMED_QUANT_REGIME",
+                direction="BEARISH",
+                invalidation_level=round(inv_level, 2),
+                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                invalidation_justification=(
+                    f"Completed daily close above Call OI Wall / swing resistance ({round(inv_level, 2)}) invalidates bearish thesis."
+                ),
+                summary=(
+                    f"90d IVP is {ivp_90} with 1D trend DOWNTREND (1H RSI={price_structure.rsi_14_1h:.1f}) "
+                    f"capped below Call OI wall at {positioning.call_oi_wall_strike} "
+                    f"({positioning.call_oi_wall_contracts} contracts). Favours Bear Call Spread or Bearish Butterfly."
+                ),
+                evidence_fields_cited=[
+                    "market_evidence.volatility_state.ivp_90d",
+                    "market_evidence.price_structure.trend_1d_state",
+                    "market_evidence.derivatives_positioning.call_oi_wall_strike",
+                ],
+            )
+        )
+
+    # 2D: Low-IV Bearish Compression Regime (Symmetric Bearish Debit Detector)
+    if numeric_ivp < 50.0 and price_structure.trend_1d_state == "DOWNTREND":
+        inv_level = (
+            price_structure.ema50_1h
+            if price_structure.ema50_1h > spot
+            else (last_1d.high if last_1d and last_1d.high > spot else spot + 150.0)
+        )
+        detectors.append(
+            TriggeredDetector(
+                detector_id="NOVEL_LOW_IV_COMPRESSION_BEARISH",
+                detector_name="Low-IVP Volatility Compression Bearish Setup (Debit-Favourable)",
+                track="NOVEL_QUANT",
+                confirmation_status="CONFIRMED_QUANT_REGIME",
+                direction="BEARISH",
+                invalidation_level=round(inv_level, 2),
+                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                invalidation_justification=(
+                    f"Completed daily close above {round(inv_level, 2)} negates downside breakdown thesis."
+                ),
+                summary=(
+                    f"90d IVP is compressed ({ivp_90}) in an active 1D DOWNTREND; "
+                    f"long-vega Bear Put Spread captures downside convex expansion without short-vol exposure."
+                ),
+                evidence_fields_cited=[
+                    "market_evidence.volatility_state.ivp_90d",
+                    "market_evidence.price_structure.trend_1d_state",
+                ],
+            )
+        )
+
+    # 2E: High-IV Range-Bound OI-Bracketed Regime (Favours Iron Condor / Iron Butterfly)
     if (
         numeric_ivp >= 55.0
         and positioning.put_oi_wall_strike < spot < positioning.call_oi_wall_strike
@@ -343,7 +478,8 @@ def run_two_track_detectors(
                 ),
                 summary=(
                     f"Spot ({spot}) is bracketed between Put OI wall ({positioning.put_oi_wall_strike}) "
-                    f"and Call OI wall ({positioning.call_oi_wall_strike}) with 90d IVP={ivp_90}."
+                    f"and Call OI wall ({positioning.call_oi_wall_strike}) with 90d IVP={ivp_90} and "
+                    f"1H RSI={price_structure.rsi_14_1h:.1f}."
                 ),
                 evidence_fields_cited=[
                     "market_evidence.derivatives_positioning.put_oi_wall_strike",
@@ -353,10 +489,45 @@ def run_two_track_detectors(
             )
         )
 
-    # 2D: Candidate Stretch Metric (Tagged DEFINITION_OPEN per Section 5.2)
+    # 2F: 25-Delta Skew Dislocation Detector
+    skew_pts = volatility.skew_25d_put_minus_call * 100.0
+    if abs(skew_pts) >= 2.5:
+        skew_dir: Literal["BULLISH", "BEARISH"] = "BULLISH" if skew_pts > 0 else "BEARISH"
+        inv_lvl = (
+            float(positioning.put_oi_wall_strike)
+            if skew_dir == "BULLISH" and positioning.put_oi_wall_strike < spot
+            else (
+                float(positioning.call_oi_wall_strike)
+                if skew_dir == "BEARISH" and positioning.call_oi_wall_strike > spot
+                else (spot - 200.0 if skew_dir == "BULLISH" else spot + 200.0)
+            )
+        )
+        detectors.append(
+            TriggeredDetector(
+                detector_id="NOVEL_SKEW_DISLOCATION",
+                detector_name="25-Delta Put-Call Skew Richness Dislocation",
+                track="NOVEL_QUANT",
+                confirmation_status="CONFIRMED_QUANT_REGIME",
+                direction=skew_dir,
+                invalidation_level=round(inv_lvl, 2),
+                invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+                invalidation_justification=(
+                    f"Completed daily close beyond {round(inv_lvl, 2)} invalidates skew-harvest thesis."
+                ),
+                summary=(
+                    f"25-delta Put-Call skew is {skew_pts:+.2f} vol pts, indicating elevated "
+                    f"{'downside put' if skew_pts > 0 else 'upside call'} wing richness relative to the opposite wing."
+                ),
+                evidence_fields_cited=[
+                    "market_evidence.volatility_state.skew_25d_put_minus_call",
+                ],
+            )
+        )
+
+    # 2G: Candidate Stretch Metric (Tagged DEFINITION_OPEN per Section 5.2)
     if price_structure.ma20_1h > 0:
         dist_pts = abs(spot - price_structure.ma20_1h)
-        if dist_pts >= 250.0:
+        if dist_pts >= 250.0 or abs(price_structure.stretch_zscore_1h) >= 2.2:
             direction = "BEARISH" if spot > price_structure.ma20_1h else "BULLISH"
             inv_level = (spot + 150.0) if direction == "BEARISH" else (spot - 150.0)
             detectors.append(
@@ -372,12 +543,14 @@ def run_two_track_detectors(
                         f"Completed daily close beyond {round(inv_level, 2)} invalidates mean-reversion."
                     ),
                     summary=(
-                        f"Spot ({spot}) is {dist_pts:.1f} pts from 1H MA20 ({price_structure.ma20_1h}). "
+                        f"Spot ({spot}) is {dist_pts:.1f} pts ({price_structure.stretch_zscore_1h:+.2f} SD) "
+                        f"from 1H MA20 ({price_structure.ma20_1h}). "
                         f"Reported as DEFINITION_OPEN until trader settles 'stretched' definition."
                     ),
                     evidence_fields_cited=[
                         "contract_context.spot.value",
                         "market_evidence.price_structure.ma20_1h",
+                        "market_evidence.price_structure.stretch_zscore_1h",
                     ],
                 )
             )
