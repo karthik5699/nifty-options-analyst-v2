@@ -2082,8 +2082,8 @@ def test_targeted_fix4_arbitrary_freeform_wording_never_enters_any_report_or_sta
     assert f"Direction: `{sel.direction}`" in delivery.full_report_markdown
     assert f"Rs {sel.contractual_max_loss_rs:,.2f}" in delivery.full_report_markdown
     assert f"Rs {sel.planned_stop_rs:,.2f}" in delivery.full_report_markdown
-    assert f"Debate: {sel.direction}" in delivery.whatsapp_digest
-    assert state.debate_state is not None and state.debate_state.dominant_regime == sel.direction
+    assert state.debate_state is not None and state.debate_state.dominant_regime == "BULLISH"
+    assert f"Debate: {state.debate_state.dominant_regime}" in delivery.whatsapp_digest
     for leg in sel.legs:
         assert leg.executable_entry_price is not None
         assert f"executable entry {leg.executable_entry_price:.2f} pts" in delivery.full_report_markdown
@@ -2141,5 +2141,516 @@ def test_targeted_fix4_arbitrary_freeform_wording_never_enters_any_report_or_sta
         assert bad_frag not in direct_deliv.user_facing_message
         assert bad_frag not in direct_deliv.whatsapp_digest
         assert bad_frag not in direct_audit.read_text(encoding="utf-8")
+
+
+def test_targeted_fix5_regime_independent_of_pick_and_conflict_forces_wait(
+    tmp_path: Path,
+) -> None:
+    """Regime assessment stays independent of any supplied pick; conflicts fail closed to WAIT without flipping regime."""
+    from nifty_analyst.output.audit_log import deliver_run_output
+    from nifty_analyst.state import DebateState, TriggeredDetector
+    from nifty_analyst.synthesis.personas import (
+        build_deterministic_personas,
+        normalize_state_narrative_from_verified_facts,
+    )
+    from nifty_analyst.synthesis.verifier import (
+        assess_market_regime,
+        verify_llm_synthesis,
+    )
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    probe_cfg = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "fix5_probe.jsonl"),
+    )
+    probe_state, _ = run_analyst_pipeline(dec_dt, probe_cfg)
+
+    pass_cands = [
+        c
+        for c in probe_state.candidate_structures
+        if c.part_a_overall_status == "PASS" and c.full_size_fill_supported
+    ]
+    bull_cand = next(
+        c for c in pass_cands if c.direction == "BULLISH" and c.technical_options_score >= 68.0
+    )
+    bear_cand = next(c for c in pass_cands if c.direction == "BEARISH")
+    ic_cand = next(c for c in pass_cands if c.direction == "NEUTRAL")
+
+    # 1. Compatible non-identical verified inputs: BULLISH market regime + NEUTRAL Iron Condor pick.
+    #    Regime MUST remain BULLISH (never changed to NEUTRAL to match the pick!), while reports
+    #    consistently render BOTH the BULLISH market regime and the NEUTRAL selected trade.
+    assert assess_market_regime(probe_state) == "BULLISH"
+    deb_ic, _, cons_ic, chosen_ic = build_deterministic_personas(
+        state=probe_state,
+        default_primary=ic_cand,
+        eligible_candidates=pass_cands,
+    )
+    assert deb_ic.dominant_regime == "BULLISH"
+    assert chosen_ic is not None and chosen_ic.structure_id == ic_cand.structure_id
+    assert chosen_ic.direction == "NEUTRAL"
+    assert cons_ic.conviction == "MODERATE"
+    assert f"`{ic_cand.structure_id}` ({ic_cand.structure_type}, NEUTRAL," in cons_ic.whatsapp_digest
+    assert "Debate: BULLISH" in cons_ic.whatsapp_digest
+
+    cfg_ic = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "fix5_ic_in_bull.jsonl"),
+    )
+    ic_idx = next(
+        i
+        for i, c in enumerate(probe_state.candidate_structures)
+        if c.structure_id == ic_cand.structure_id
+    )
+    st_ic, deliv_ic = run_analyst_pipeline(
+        dec_dt,
+        cfg_ic,
+        force_render_for_inspection=True,
+        llm_provider=_StaticOverrideProvider(
+            lambda _r, s, _p, _a: OfflineDeterministicSynthesisProvider().synthesize(
+                "{}", s, ic_cand, []
+            )
+        ),
+    )
+    assert st_ic.final_output is not None
+    assert st_ic.final_output.verdict == "SUGGESTION"
+    assert st_ic.final_output.verifier_report.passed_verification is True
+    assert st_ic.debate_state is not None and st_ic.debate_state.dominant_regime == "BULLISH"
+    assert st_ic.final_output.primary_proposal is not None
+    assert st_ic.final_output.primary_proposal.structure_id == ic_cand.structure_id
+    assert st_ic.final_output.primary_proposal.direction == "NEUTRAL"
+    assert "Dominant Regime (`BULLISH`)" in deliv_ic.full_report_markdown
+    assert f"**Structure ID**: `{ic_cand.structure_id}`" in deliv_ic.full_report_markdown
+    assert "Direction: `NEUTRAL`" in deliv_ic.full_report_markdown
+    assert "Debate: BULLISH" in deliv_ic.whatsapp_digest
+    assert f"`{ic_cand.structure_id}` ({ic_cand.structure_type}, NEUTRAL," in deliv_ic.whatsapp_digest
+    _ = ic_idx
+
+    # 2. Exact Instinct reproducer: DOWNTREND + CONFIRMED_QUANT_REGIME BEARISH signal + supplied BULLISH candidate.
+    #    Regime MUST stay BEARISH (NEVER flipped to BULLISH with HIGH conviction!), and conflict MUST force WAIT/SIT_OUT.
+    bear_ps = dataclasses.replace(
+        probe_state.market_evidence.price_structure,
+        trend_1d_state="DOWNTREND",
+        higher_high_higher_low_repaired=False,
+        first_pullback_in_downtrend_warning=True,
+    )
+    bear_det = TriggeredDetector(
+        detector_id="NOVEL_HIGH_IV_BEARISH_CALL_WALL",
+        detector_name="Elevated IVP + Downtrend Below Call OI Wall",
+        track="NOVEL_QUANT",
+        confirmation_status="CONFIRMED_QUANT_REGIME",
+        direction="BEARISH",
+        invalidation_level=float(probe_state.market_evidence.derivatives_positioning.call_oi_wall_strike),
+        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+        invalidation_justification="Completed daily close above Call OI wall invalidates bearish regime.",
+        summary="Confirmed 1D DOWNTREND capped below Call OI wall.",
+        evidence_fields_cited=[
+            "market_evidence.price_structure.trend_1d_state",
+            "market_evidence.derivatives_positioning.call_oi_wall_strike",
+        ],
+    )
+    bear_ev = dataclasses.replace(
+        probe_state.market_evidence,
+        price_structure=bear_ps,
+        triggered_detectors=[bear_det],
+    )
+    bear_state = dataclasses.replace(probe_state, market_evidence=bear_ev)
+
+    assert assess_market_regime(bear_state) == "BEARISH"
+
+    # 2a. `build_deterministic_personas` with supplied bullish candidate
+    deb_b, triad_b, cons_b, chosen_b = build_deterministic_personas(
+        state=bear_state,
+        default_primary=bull_cand,
+        eligible_candidates=[bull_cand, bear_cand],
+    )
+    assert deb_b.dominant_regime == "BEARISH"
+    assert chosen_b is None
+    assert cons_b.recommended_structure_id == "WAIT"
+    assert cons_b.conviction == "SIT_OUT"
+    assert "Debate: BEARISH" in cons_b.whatsapp_digest
+    assert "WAIT (SIT_OUT)" in cons_b.whatsapp_digest
+    assert bull_cand.structure_id not in cons_b.whatsapp_digest
+    assert bull_cand.structure_id not in triad_b.neutral_arbiter_note
+
+    # 2b. `OfflineDeterministicSynthesisProvider` with supplied bullish `primary`
+    synth_b = OfflineDeterministicSynthesisProvider().synthesize(
+        "{}", bear_state, primary=bull_cand, alternatives=[bear_cand]
+    )
+    assert synth_b.debate_state is not None and synth_b.debate_state.dominant_regime == "BEARISH"
+    assert synth_b.consolidator_state is not None
+    assert synth_b.consolidator_state.recommended_structure_id == "WAIT"
+    assert synth_b.consolidator_state.conviction == "SIT_OUT"
+    assert "Debate: BEARISH" in synth_b.consolidator_state.whatsapp_digest
+
+    # 2c. Auto-selection (`default_primary=None`) in BEARISH regime ignores higher-scoring BULLISH candidate
+    deb_auto, _, cons_auto, chosen_auto = build_deterministic_personas(
+        state=bear_state,
+        default_primary=None,
+        eligible_candidates=[bull_cand, bear_cand],
+    )
+    assert deb_auto.dominant_regime == "BEARISH"
+    assert chosen_auto is not None and chosen_auto.structure_id == bear_cand.structure_id
+    assert chosen_auto.direction == "BEARISH"
+    assert cons_auto.recommended_structure_id == bear_cand.structure_id
+
+    # 2d. `verify_llm_synthesis` rejects a BULLISH candidate recommended in a BEARISH regime
+    bull_idx = next(
+        i
+        for i, c in enumerate(bear_state.candidate_structures)
+        if c.structure_id == bull_cand.structure_id
+    )
+    _, vrep_conflict = verify_llm_synthesis(
+        state=bear_state,
+        raw_citations=[
+            {
+                "claim_text": "Max loss check",
+                "state_field_path": f"candidate_structures[{bull_idx}].contractual_max_loss_rs",
+                "cited_value": bull_cand.contractual_max_loss_rs,
+            }
+        ],
+        selected_primary=bull_cand,
+        consolidator_recommended_id=bull_cand.structure_id,
+        debate_dominant_regime="BULLISH",
+    )
+    assert vrep_conflict.passed_verification is False
+    assert vrep_conflict.part_a_reverified is False
+    joined_reasons = " | ".join(vrep_conflict.failure_reasons)
+    assert "REGIME_CANDIDATE_CONFLICT" in joined_reasons
+
+    # 2e. Direct `normalize_state_narrative_from_verified_facts`, `render_analyst_report`, and `deliver_run_output`
+    #     on a tampered state (`DOWNTREND` + `BEARISH` evidence, `primary_proposal=bull_cand`, `dominant_regime="BULLISH"`)
+    assert bear_state.final_output is not None and bear_state.consolidator_state is not None
+    tampered_bear = dataclasses.replace(
+        bear_state,
+        debate_state=DebateState(
+            bull_thesis="Bullish override",
+            bear_thesis="Bearish",
+            vol_regime_thesis="Vol",
+            rebuttal_round="Rebuttal",
+            dominant_regime="BULLISH",
+        ),
+        consolidator_state=dataclasses.replace(
+            bear_state.consolidator_state,
+            recommended_structure_id=bull_cand.structure_id,
+            conviction="HIGH",
+        ),
+        final_output=dataclasses.replace(
+            bear_state.final_output,
+            verdict="SUGGESTION",
+            is_live_ready=True,
+            primary_proposal=bull_cand,
+        ),
+    )
+    norm_bear = normalize_state_narrative_from_verified_facts(tampered_bear)
+    assert norm_bear.debate_state is not None and norm_bear.debate_state.dominant_regime == "BEARISH"
+    assert norm_bear.final_output is not None and norm_bear.final_output.verdict == "WAIT"
+    assert norm_bear.final_output.primary_proposal is None
+    assert norm_bear.consolidator_state is not None
+    assert norm_bear.consolidator_state.recommended_structure_id == "WAIT"
+    assert norm_bear.consolidator_state.conviction == "SIT_OUT"
+
+    bear_audit = tmp_path / "fix5_bear_conflict_audit.jsonl"
+    bear_deliv = deliver_run_output(
+        tampered_bear, bear_audit, force_render_for_inspection=True
+    )
+    assert bear_deliv.alerted_trader is False
+    assert "Dominant Regime (`BEARISH`)" in bear_deliv.full_report_markdown
+    assert "Verdict = WAIT" in bear_deliv.full_report_markdown
+    assert "Debate: BEARISH" in bear_deliv.whatsapp_digest
+    assert bull_cand.structure_id not in bear_deliv.whatsapp_digest
+    bear_row = json.loads(bear_audit.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert bear_row["verdict"] == "WAIT"
+    assert bear_row["debate_state"]["dominant_regime"] == "BEARISH"
+    assert bear_row["consolidator_state"]["conviction"] == "SIT_OUT"
+
+    # 3. Symmetric opposite conflict end-to-end through `run_analyst_pipeline`:
+    #    UPTREND + CONFIRMED_QUANT_REGIME BULLISH fixture + agent_artifact recommending a BEARISH PASS candidate.
+    art_sym = tmp_path / "fix5_sym_bear_in_bull.json"
+    req_sym = tmp_path / "fix5_sym_bear_in_bull.json.request.json"
+    cfg_sym = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "fix5_sym_audit.jsonl"),
+        llm_provider="agent_artifact",
+        agent_synthesis_artifact_path=str(art_sym),
+    )
+    with pytest.raises(FileNotFoundError):
+        run_analyst_pipeline(dec_dt, cfg_sym)
+
+    req_doc = json.loads(req_sym.read_text(encoding="utf-8"))
+    bear_idx = next(
+        i
+        for i, c in enumerate(probe_state.candidate_structures)
+        if c.structure_id == bear_cand.structure_id
+    )
+    bear_card = {
+        "state_index": bear_idx,
+        "structure_id": bear_cand.structure_id,
+        "contractual_max_loss_rs": bear_cand.contractual_max_loss_rs,
+    }
+    _write_valid_agent_artifact(art_sym, req_doc, chosen_card=bear_card)
+    st_sym, deliv_sym = run_analyst_pipeline(
+        dec_dt, cfg_sym, force_render_for_inspection=True
+    )
+    assert st_sym.final_output is not None
+    assert st_sym.debate_state is not None and st_sym.debate_state.dominant_regime == "BULLISH"
+    assert st_sym.final_output.verifier_report.passed_verification is False
+    assert "REGIME_CANDIDATE_CONFLICT" in " | ".join(
+        st_sym.final_output.verifier_report.failure_reasons
+    )
+    assert st_sym.final_output.verdict == "WAIT"
+    assert st_sym.final_output.primary_proposal is None
+    assert st_sym.consolidator_state is not None
+    assert st_sym.consolidator_state.conviction == "SIT_OUT"
+    assert deliv_sym.alerted_trader is False
+    assert "Debate: BULLISH" in deliv_sym.whatsapp_digest
+    assert bear_cand.structure_id not in deliv_sym.whatsapp_digest
+
+    # 4. Competing market-evidence regime signals resolve to CONTESTED_WAIT (while auxiliary skew in DOWNTREND stays BEARISH).
+    skew_aux = TriggeredDetector(
+        detector_id="NOVEL_SKEW_DISLOCATION",
+        detector_name="25-Delta Put-Call Skew Richness Dislocation",
+        track="NOVEL_QUANT",
+        confirmation_status="CONFIRMED_QUANT_REGIME",
+        direction="BULLISH",
+        invalidation_level=23800.0,
+        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+        invalidation_justification="Skew harvest invalidation.",
+        summary="Elevated put skew during downtrend.",
+        evidence_fields_cited=["market_evidence.volatility_state.skew_25d_put_minus_call"],
+    )
+    bear_with_skew = dataclasses.replace(
+        bear_state,
+        market_evidence=dataclasses.replace(
+            bear_state.market_evidence, triggered_detectors=[bear_det, skew_aux]
+        ),
+    )
+    assert assess_market_regime(bear_with_skew) == "BEARISH"
+
+    bull_det = next(
+        d
+        for d in probe_state.market_evidence.triggered_detectors
+        if d.confirmation_status == "CONFIRMED_QUANT_REGIME" and d.direction == "BULLISH"
+    )
+    competing_state = dataclasses.replace(
+        probe_state,
+        market_evidence=dataclasses.replace(
+            probe_state.market_evidence, triggered_detectors=[bull_det, bear_det]
+        ),
+    )
+    assert assess_market_regime(competing_state) == "CONTESTED_WAIT"
+    deb_comp, _, cons_comp, chosen_comp = build_deterministic_personas(
+        competing_state, default_primary=bull_cand, eligible_candidates=[bull_cand, bear_cand]
+    )
+    assert deb_comp.dominant_regime == "CONTESTED_WAIT"
+    assert chosen_comp is None
+    assert cons_comp.recommended_structure_id == "WAIT"
+    assert cons_comp.conviction == "SIT_OUT"
+
+    bull_in_downtrend = dataclasses.replace(
+        bear_state,
+        market_evidence=dataclasses.replace(
+            bear_state.market_evidence, triggered_detectors=[bull_det]
+        ),
+    )
+    assert assess_market_regime(bull_in_downtrend) == "CONTESTED_WAIT"
+
+
+def test_targeted_fix5_missing_confirmation_forces_contested_wait_even_with_supplied_candidate(
+    tmp_path: Path,
+) -> None:
+    """Missing `CONFIRMED_QUANT_REGIME` confirmation (empty or unconfirmed-only detectors) forces CONTESTED_WAIT + WAIT."""
+    from nifty_analyst.output.audit_log import deliver_run_output
+    from nifty_analyst.state import TriggeredDetector
+    from nifty_analyst.synthesis.personas import (
+        build_deterministic_personas,
+        normalize_state_narrative_from_verified_facts,
+    )
+    from nifty_analyst.synthesis.verifier import (
+        assess_market_regime,
+        verify_llm_synthesis,
+    )
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    probe_state, _ = run_analyst_pipeline(
+        dec_dt,
+        AnalystConfig(
+            mode="OFFLINE",
+            fixtures_dir=str(FIXTURES_DIR),
+            audit_log_path=str(tmp_path / "fix5_missing_probe.jsonl"),
+        ),
+    )
+    pass_cands = [
+        c
+        for c in probe_state.candidate_structures
+        if c.part_a_overall_status == "PASS" and c.full_size_fill_supported
+    ]
+    bull_cand = next(
+        c for c in pass_cands if c.direction == "BULLISH" and c.technical_options_score >= 68.0
+    )
+    ic_cand = next(c for c in pass_cands if c.direction == "NEUTRAL")
+    bull_idx = next(
+        i
+        for i, c in enumerate(probe_state.candidate_structures)
+        if c.structure_id == bull_cand.structure_id
+    )
+
+    # 1. Zero triggered detectors (`triggered_detectors == []`) + supplied high-score BULLISH candidate
+    empty_det_state = dataclasses.replace(
+        probe_state,
+        market_evidence=dataclasses.replace(
+            probe_state.market_evidence, triggered_detectors=[]
+        ),
+    )
+    assert assess_market_regime(empty_det_state) == "CONTESTED_WAIT"
+    deb_e, _, cons_e, chosen_e = build_deterministic_personas(
+        state=empty_det_state,
+        default_primary=bull_cand,
+        eligible_candidates=pass_cands,
+    )
+    assert deb_e.dominant_regime == "CONTESTED_WAIT"
+    assert chosen_e is None
+    assert cons_e.recommended_structure_id == "WAIT"
+    assert cons_e.conviction == "SIT_OUT"
+    assert "Debate: CONTESTED_WAIT" in cons_e.whatsapp_digest
+
+    synth_e = OfflineDeterministicSynthesisProvider().synthesize(
+        "{}", empty_det_state, primary=bull_cand, alternatives=pass_cands
+    )
+    assert synth_e.debate_state is not None
+    assert synth_e.debate_state.dominant_regime == "CONTESTED_WAIT"
+    assert synth_e.consolidator_state is not None
+    assert synth_e.consolidator_state.recommended_structure_id == "WAIT"
+    assert synth_e.consolidator_state.conviction == "SIT_OUT"
+
+    # 2. Only unconfirmed detectors (`HISTORICAL_REFERENCE_UNCONFIRMED` + `DEFINITION_OPEN`, zero `CONFIRMED_QUANT_REGIME`)
+    hist_unconfirmed = TriggeredDetector(
+        detector_id="HIST_1H_MA20_TOUCH",
+        detector_name="1H MA20 Completed-Bar Wick Touch (Historical Variant)",
+        track="PART_C_HISTORICAL",
+        confirmation_status="HISTORICAL_REFERENCE_UNCONFIRMED",
+        direction="BULLISH",
+        invalidation_level=24000.0,
+        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+        invalidation_justification="Historical reference only.",
+        summary="Context only, never blocks or gates.",
+        evidence_fields_cited=["market_evidence.price_structure.ma20_1h"],
+    )
+    stretch_open = TriggeredDetector(
+        detector_id="NOVEL_STRETCH_METRIC_CANDIDATE",
+        detector_name="Spot vs 1H MA20 Stretch Candidate (Definition Open)",
+        track="NOVEL_QUANT",
+        confirmation_status="DEFINITION_OPEN",
+        direction="BULLISH",
+        invalidation_level=23950.0,
+        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+        invalidation_justification="Open definition.",
+        summary="Reported as DEFINITION_OPEN.",
+        evidence_fields_cited=["contract_context.spot.value"],
+    )
+    unconfirmed_state = dataclasses.replace(
+        probe_state,
+        market_evidence=dataclasses.replace(
+            probe_state.market_evidence,
+            triggered_detectors=[hist_unconfirmed, stretch_open],
+        ),
+    )
+    assert assess_market_regime(unconfirmed_state) == "CONTESTED_WAIT"
+    deb_u, _, cons_u, chosen_u = build_deterministic_personas(
+        state=unconfirmed_state,
+        default_primary=bull_cand,
+        eligible_candidates=pass_cands,
+    )
+    assert deb_u.dominant_regime == "CONTESTED_WAIT"
+    assert chosen_u is None
+    assert cons_u.recommended_structure_id == "WAIT"
+    assert cons_u.conviction == "SIT_OUT"
+
+    _, vrep_unconf = verify_llm_synthesis(
+        state=unconfirmed_state,
+        raw_citations=[
+            {
+                "claim_text": "Max loss check",
+                "state_field_path": f"candidate_structures[{bull_idx}].contractual_max_loss_rs",
+                "cited_value": bull_cand.contractual_max_loss_rs,
+            }
+        ],
+        selected_primary=bull_cand,
+        consolidator_recommended_id=bull_cand.structure_id,
+        debate_dominant_regime="BULLISH",
+    )
+    assert vrep_unconf.passed_verification is False
+    assert vrep_unconf.part_a_reverified is False
+    assert "MISSING_OR_CONTESTED_REGIME_CONFIRMATION" in " | ".join(vrep_unconf.failure_reasons)
+
+    assert unconfirmed_state.final_output is not None
+    tampered_unconf = dataclasses.replace(
+        unconfirmed_state,
+        final_output=dataclasses.replace(
+            unconfirmed_state.final_output,
+            verdict="SUGGESTION",
+            is_live_ready=True,
+            primary_proposal=bull_cand,
+        ),
+    )
+    norm_unconf = normalize_state_narrative_from_verified_facts(tampered_unconf)
+    assert (
+        norm_unconf.debate_state is not None
+        and norm_unconf.debate_state.dominant_regime == "CONTESTED_WAIT"
+    )
+    assert norm_unconf.final_output is not None and norm_unconf.final_output.verdict == "WAIT"
+    assert norm_unconf.final_output.primary_proposal is None
+    unconf_deliv = deliver_run_output(
+        tampered_unconf,
+        tmp_path / "fix5_unconfirmed_audit.jsonl",
+        force_render_for_inspection=True,
+    )
+    assert unconf_deliv.alerted_trader is False
+    assert "Debate: CONTESTED_WAIT" in unconf_deliv.whatsapp_digest
+    assert bull_cand.structure_id not in unconf_deliv.whatsapp_digest
+
+    # 3. Purely NEUTRAL confirmed regime (`RANGE` + `NOVEL_OI_BRACKETED_NEUTRAL_RANGE` only):
+    #    directional BULLISH candidate lacks directional confirmation -> rejected (regime stays NEUTRAL),
+    #    whereas NEUTRAL Iron Condor candidate is accepted.
+    neutral_det = TriggeredDetector(
+        detector_id="NOVEL_OI_BRACKETED_NEUTRAL_RANGE",
+        detector_name="High-IV OI-Wall Bracketed Neutral Regime",
+        track="NOVEL_QUANT",
+        confirmation_status="CONFIRMED_QUANT_REGIME",
+        direction="NEUTRAL",
+        invalidation_level=float(probe_state.market_evidence.derivatives_positioning.call_oi_wall_strike),
+        invalidation_candle_basis="COMPLETED_DAILY_CLOSE",
+        invalidation_justification="Close outside OI bracket.",
+        summary="Spot bracketed between OI walls.",
+        evidence_fields_cited=["market_evidence.volatility_state.ivp_90d"],
+    )
+    neutral_only_state = dataclasses.replace(
+        probe_state,
+        market_evidence=dataclasses.replace(
+            probe_state.market_evidence,
+            price_structure=dataclasses.replace(
+                probe_state.market_evidence.price_structure, trend_1d_state="RANGE"
+            ),
+            triggered_detectors=[neutral_det],
+        ),
+    )
+    assert assess_market_regime(neutral_only_state) == "NEUTRAL"
+    deb_nb, _, cons_nb, chosen_nb = build_deterministic_personas(
+        neutral_only_state, default_primary=bull_cand, eligible_candidates=[bull_cand, ic_cand]
+    )
+    assert deb_nb.dominant_regime == "NEUTRAL"
+    assert chosen_nb is None
+    assert cons_nb.recommended_structure_id == "WAIT"
+    assert cons_nb.conviction == "SIT_OUT"
+
+    deb_nn, _, cons_nn, chosen_nn = build_deterministic_personas(
+        neutral_only_state, default_primary=ic_cand, eligible_candidates=[bull_cand, ic_cand]
+    )
+    assert deb_nn.dominant_regime == "NEUTRAL"
+    assert chosen_nn is not None and chosen_nn.structure_id == ic_cand.structure_id
+    assert cons_nn.recommended_structure_id == ic_cand.structure_id
+
 
 

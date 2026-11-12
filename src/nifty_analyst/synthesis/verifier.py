@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from nifty_analyst.state import (
     CandidateStructure,
@@ -27,6 +27,99 @@ from nifty_analyst.state import (
     NiftyOptionsState,
     VerifierReport,
 )
+
+
+RegimeLabel = Literal["BULLISH", "BEARISH", "NEUTRAL", "CONTESTED_WAIT"]
+
+
+def assess_market_regime(state: NiftyOptionsState) -> RegimeLabel:
+    """Assess dominant market regime strictly from `state.market_evidence` (zero candidate coupling).
+
+    Rules:
+    1. Requires at least one `CONFIRMED_QUANT_REGIME` detector (`HISTORICAL_REFERENCE_UNCONFIRMED`
+       and `DEFINITION_OPEN` never establish confirmation on their own -> `CONTESTED_WAIT`).
+    2. Competing non-skew directional confirmed regimes (`BULLISH` and `BEARISH` both confirmed)
+       or confirmed directional detectors contradicting the 1D trend state (`BULLISH` regime
+       detector in unrepaired `DOWNTREND`, or `BEARISH` regime detector in `UPTREND` /
+       `DOWNTREND_REPAIRED_HH_HL`) resolve to `CONTESTED_WAIT`.
+    3. Never inspects `default_primary`, `selected_primary`, or `candidate_structures`.
+    """
+    ps = state.market_evidence.price_structure
+    detectors = state.market_evidence.triggered_detectors
+
+    confirmed = [
+        d for d in detectors if d.confirmation_status == "CONFIRMED_QUANT_REGIME"
+    ]
+    if not confirmed:
+        return "CONTESTED_WAIT"
+
+    confirmed_dirs = [d.direction for d in confirmed]
+    all_confirmed_set = set(confirmed_dirs)
+    non_skew_dirs = {
+        d.direction for d in confirmed if d.detector_id != "NOVEL_SKEW_DISLOCATION"
+    }
+
+    # Explicit conflict between competing primary directional regime detectors
+    if "BULLISH" in non_skew_dirs and "BEARISH" in non_skew_dirs:
+        return "CONTESTED_WAIT"
+
+    if ps.trend_1d_state in ("UPTREND", "DOWNTREND_REPAIRED_HH_HL"):
+        if "BEARISH" in non_skew_dirs:
+            return "CONTESTED_WAIT"
+        if "BULLISH" in all_confirmed_set:
+            return "BULLISH"
+        if "NEUTRAL" in all_confirmed_set:
+            return "NEUTRAL"
+        return "CONTESTED_WAIT"
+
+    if ps.trend_1d_state == "DOWNTREND":
+        if "BULLISH" in non_skew_dirs:
+            return "CONTESTED_WAIT"
+        if "BEARISH" in all_confirmed_set:
+            return "BEARISH"
+        if "NEUTRAL" in all_confirmed_set and "BULLISH" not in all_confirmed_set:
+            return "NEUTRAL"
+        return "CONTESTED_WAIT"
+
+    # `RANGE` 1D structure
+    if "BULLISH" in all_confirmed_set and "BEARISH" in all_confirmed_set:
+        return "CONTESTED_WAIT"
+    if "NEUTRAL" in all_confirmed_set:
+        return "NEUTRAL"
+    return confirmed_dirs[0]
+
+
+def is_candidate_compatible_with_regime(
+    cand: CandidateStructure,
+    dominant_regime: str,
+    state: NiftyOptionsState,
+) -> bool:
+    """Return True iff `cand` clears Part A + full-size depth AND does not conflict with `dominant_regime`."""
+    if (
+        cand.part_a_overall_status != "PASS"
+        or not cand.full_size_fill_supported
+        or any(chk.status in ("FAIL", "UNKNOWN") for chk in cand.part_a_checks.values())
+    ):
+        return False
+
+    if dominant_regime == "CONTESTED_WAIT":
+        return False
+
+    if dominant_regime == "BULLISH" and cand.direction == "BEARISH":
+        return False
+    if dominant_regime == "BEARISH" and cand.direction == "BULLISH":
+        return False
+
+    if dominant_regime == "NEUTRAL" and cand.direction in ("BULLISH", "BEARISH"):
+        confirmed_dirs = {
+            d.direction
+            for d in state.market_evidence.triggered_detectors
+            if d.confirmation_status == "CONFIRMED_QUANT_REGIME"
+        }
+        if cand.direction not in confirmed_dirs:
+            return False
+
+    return True
 
 _INDEX_STEP_RE = re.compile(r"^([a-zA-Z0-9_]+)(?:\[(\d+)\])?$")
 _STRUCT_ID_RE = re.compile(
@@ -760,6 +853,20 @@ def validate_supplied_digest(
         checked += 1
         errors.append("digest:FALSE_LIVE_READY_CLAIM")
 
+    independent_regime = assess_market_regime(state)
+    for m_deb in re.finditer(r"\bDebate:\s*([A-Z_]+)\b", text):
+        deb_tok = m_deb.group(1).strip().upper()
+        checked += 1
+        if (
+            (independent_regime == "BULLISH" and deb_tok == "BEARISH")
+            or (independent_regime == "BEARISH" and deb_tok == "BULLISH")
+            or (independent_regime == "CONTESTED_WAIT" and deb_tok != "CONTESTED_WAIT")
+            or (selected_primary is not None and deb_tok == "CONTESTED_WAIT")
+        ):
+            errors.append(
+                f"digest:DOMINANT_REGIME_MISMATCH:{deb_tok}!=verified_regime:{independent_regime}"
+            )
+
     allowed_upper_words = _allowed_upper_words_for_state(state)
 
     if selected_primary is None:
@@ -1228,12 +1335,21 @@ def verify_llm_synthesis(
         expected_is_live_ready=expected_is_live_ready,
     )
 
-    if selected_primary is not None and debate_dominant_regime is not None:
+    independent_regime = assess_market_regime(state)
+    if debate_dominant_regime is not None:
         dom_up = debate_dominant_regime.strip().upper()
         prose_checked += 1
-        if dom_up == "CONTESTED_WAIT":
+        if (
+            (independent_regime == "BULLISH" and dom_up == "BEARISH")
+            or (independent_regime == "BEARISH" and dom_up == "BULLISH")
+            or (independent_regime == "CONTESTED_WAIT" and dom_up != "CONTESTED_WAIT")
+        ):
+            uncited_prose.append(
+                f"debate_state:DOMINANT_REGIME_CONTRADICTS_EVIDENCE:{dom_up}!=verified_regime:{independent_regime}"
+            )
+        elif selected_primary is not None and dom_up == "CONTESTED_WAIT":
             uncited_prose.append("debate_state:DOMINANT_REGIME_CONTESTED_WAIT_ON_SUGGESTION")
-        elif (
+        elif selected_primary is not None and (
             (selected_primary.direction == "BULLISH" and dom_up == "BEARISH")
             or (selected_primary.direction == "BEARISH" and dom_up == "BULLISH")
         ):
@@ -1256,7 +1372,7 @@ def verify_llm_synthesis(
             f"PROSE_OR_DIGEST_SEMANTIC_MISMATCH: ungrounded/contradictory claims detected {uncited_prose}."
         )
 
-    # Re-verify Consolidator recommendation & Part A + full-size depth compliance of primary proposal
+    # Re-verify Consolidator recommendation, independent regime confirmation/compatibility, & Part A + depth
     part_a_reverified = True
     if consolidator_recommended_id and consolidator_recommended_id != "WAIT":
         by_id = {c.structure_id: c for c in state.candidate_structures}
@@ -1278,6 +1394,18 @@ def verify_llm_synthesis(
                 f"Consolidator recommended {consolidator_recommended_id!r} without verified "
                 f"full-size depth ({rec_cand.execution_fill_basis})."
             )
+        elif independent_regime == "CONTESTED_WAIT":
+            part_a_reverified = False
+            failure_reasons.append(
+                f"MISSING_OR_CONTESTED_REGIME_CONFIRMATION: Consolidator recommended "
+                f"{consolidator_recommended_id!r} while independent market regime is 'CONTESTED_WAIT'."
+            )
+        elif not is_candidate_compatible_with_regime(rec_cand, independent_regime, state):
+            part_a_reverified = False
+            failure_reasons.append(
+                f"REGIME_CANDIDATE_CONFLICT: Consolidator recommended {consolidator_recommended_id!r} "
+                f"({rec_cand.direction}) which conflicts with independent market regime {independent_regime!r}."
+            )
 
     if selected_primary is not None:
         any_non_pass = any(
@@ -1291,6 +1419,18 @@ def verify_llm_synthesis(
             part_a_reverified = False
             failure_reasons.append(
                 f"Primary structure {selected_primary.structure_id} failed Part A or full-size depth re-verification."
+            )
+        if independent_regime == "CONTESTED_WAIT":
+            part_a_reverified = False
+            failure_reasons.append(
+                f"MISSING_OR_CONTESTED_REGIME_CONFIRMATION: Primary structure {selected_primary.structure_id} "
+                "cannot be recommended while independent market regime is 'CONTESTED_WAIT'."
+            )
+        elif not is_candidate_compatible_with_regime(selected_primary, independent_regime, state):
+            part_a_reverified = False
+            failure_reasons.append(
+                f"REGIME_CANDIDATE_CONFLICT: Primary structure {selected_primary.structure_id} "
+                f"({selected_primary.direction}) conflicts with independent market regime {independent_regime!r}."
             )
         if selected_primary.contractual_max_loss_rs > 10000.0 + 1e-6:
             part_a_reverified = False

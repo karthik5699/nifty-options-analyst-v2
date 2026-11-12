@@ -100,7 +100,11 @@ from nifty_analyst.synthesis.personas import (
     build_single_pass_persona_prompt,
     build_verified_report_narrative,
 )
-from nifty_analyst.synthesis.verifier import verify_llm_synthesis
+from nifty_analyst.synthesis.verifier import (
+    assess_market_regime,
+    is_candidate_compatible_with_regime,
+    verify_llm_synthesis,
+)
 
 
 def build_portfolio_exposure_state(
@@ -927,19 +931,18 @@ def run_analyst_pipeline(
     # -------------------------------------------------------------------------
     # LAYER 3 & 4: SINGLE-PASS SYNTHESIS, STRICT VERIFICATION & BOUND DELIVERY
     # -------------------------------------------------------------------------
-    confirmed_quant_dirs = [
-        d.direction for d in detectors if d.confirmation_status == "CONFIRMED_QUANT_REGIME"
+    independent_regime = assess_market_regime(pre_llm_state)
+    primary_dir = (
+        independent_regime
+        if independent_regime in ("BULLISH", "BEARISH", "NEUTRAL")
+        else None
+    )
+
+    eligible = [
+        c
+        for c in candidates
+        if is_candidate_compatible_with_regime(c, independent_regime, pre_llm_state)
     ]
-    primary_dir = confirmed_quant_dirs[0] if confirmed_quant_dirs else None
-
-    def _is_strictly_eligible(cand: CandidateStructure) -> bool:
-        return (
-            cand.part_a_overall_status == "PASS"
-            and cand.full_size_fill_supported
-            and all(chk.status not in ("FAIL", "UNKNOWN") for chk in cand.part_a_checks.values())
-        )
-
-    eligible = [c for c in candidates if _is_strictly_eligible(c)]
     eligible.sort(
         key=lambda c: _rank_candidate(c, vol_evidence.ivp_90d, primary_dir),
         reverse=True,
@@ -947,7 +950,9 @@ def run_analyst_pipeline(
     eligible_ids = {c.structure_id for c in eligible}
     cand_by_id = {c.structure_id: c for c in candidates}
 
-    default_primary: CandidateStructure | None = eligible[0] if (eligible and detectors) else None
+    default_primary: CandidateStructure | None = (
+        eligible[0] if (eligible and independent_regime != "CONTESTED_WAIT") else None
+    )
     default_alternatives = [
         c
         for c in candidates

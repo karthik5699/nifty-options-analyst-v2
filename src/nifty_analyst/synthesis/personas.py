@@ -27,7 +27,12 @@ from nifty_analyst.state import (
     OptionLeg,
     RiskTriadState,
 )
-from nifty_analyst.synthesis.verifier import resolve_state_path, values_match
+from nifty_analyst.synthesis.verifier import (
+    assess_market_regime,
+    is_candidate_compatible_with_regime,
+    resolve_state_path,
+    values_match,
+)
 
 PERSONA_DEFINITIONS: dict[str, str] = {
     "bull_researcher": (
@@ -312,11 +317,12 @@ def format_whatsapp_digest(
 
     iv_pct = vol.constant_maturity_30d_iv * 100.0
     skew_pts = vol.skew_25d_put_minus_call * 100.0
+    verified_regime = assess_market_regime(state)
 
-    if selected is None or selected.part_a_overall_status != "PASS" or not selected.full_size_fill_supported:
+    if selected is None or not is_candidate_compatible_with_regime(selected, verified_regime, state):
         return (
             f"*NIFTY Options Desk — WAIT (SIT_OUT)*\n"
-            f"• Spot: {spot:.1f} | 1D: {ps.trend_1d_state} | 1H RSI: {ps.rsi_14_1h:.1f}\n"
+            f"• Spot: {spot:.1f} | 1D: {ps.trend_1d_state} | 1H RSI: {ps.rsi_14_1h:.1f} | Debate: {verified_regime}\n"
             f"• Surface: CM30 IV {iv_pct:.2f}% | 90d IVP {vol.ivp_90d} | Skew {skew_pts:+.2f} pts ({vol.term_structure_regime})\n"
             f"• OI Bracket: Put Wall {pos.put_oi_wall_strike:.0f} / Call Wall {pos.call_oi_wall_strike:.0f} (PCR {pos.pcr_oi:.2f})\n"
             f"• Decision: Sit out (`WAIT`) — no structure cleared deterministic Part A, full-size depth, & Consolidator gates."
@@ -331,7 +337,7 @@ def format_whatsapp_digest(
         f"• *Pick*: `{selected.structure_id}` ({selected.structure_type}, {selected.direction}, {selected.expiry_date}, {selected.dte_trading_sessions} DTE)\n"
         f"• *Legs* ({selected.lots} lot = {selected.lot_size * selected.lots} qty, {selected.execution_fill_basis}): {legs_txt}\n"
         f"• *Entry*: Net {entry_kind} {selected.executable_net_points_per_unit:.2f} pts | Tech+Opt Score: {selected.technical_options_score:.1f}/100\n"
-        f"• *Market*: Spot {spot:.1f} | 1D {ps.trend_1d_state} (RSI {ps.rsi_14_1h:.1f}) | 90d IVP {vol.ivp_90d} | Skew {skew_pts:+.2f}v | Debate: {selected.direction}\n"
+        f"• *Market*: Spot {spot:.1f} | 1D {ps.trend_1d_state} (RSI {ps.rsi_14_1h:.1f}) | 90d IVP {vol.ivp_90d} | Skew {skew_pts:+.2f}v | Debate: {verified_regime}\n"
         f"• *Risk (4 Distinct Caps)*: Max Loss Rs {selected.contractual_max_loss_rs:,.0f} | Stop Rs {selected.planned_stop_rs:,.0f} (~{selected.indicative_stop_index_level:.0f}) | Summed Stop Rs {selected.portfolio_summed_stop_after_trade_rs:,.0f}/10k | Margin ~Rs {selected.margin_estimate_rs:,.0f}\n"
         f"• *Edge & Exit*: Net BE {be_txt} | PoP {selected.pop_lognormal_expiry:.1f}% | Invalidation {selected.invalidation_level:.0f} ({selected.invalidation_candle_basis})"
     )
@@ -356,18 +362,34 @@ def build_deterministic_personas(
     vol = state.market_evidence.volatility_state
     pos = state.market_evidence.derivatives_positioning
     evs = state.market_evidence.event_calendar.events_within_dte
-    detectors = state.market_evidence.triggered_detectors
 
     ivp_90 = vol.ivp_90d
     iv_rv_pts = vol.iv_rv_spread * 100.0
     skew_pts = vol.skew_25d_put_minus_call * 100.0
 
+    # Assess market regime FIRST and 100% independently of any supplied/eligible candidate.
+    dom_regime: Literal["BULLISH", "BEARISH", "NEUTRAL", "CONTESTED_WAIT"] = assess_market_regime(
+        state
+    )
+
     strict_eligible = [c for c in eligible_candidates if _is_strict_eligible(c)]
+    compatible_eligible = [
+        c for c in strict_eligible if is_candidate_compatible_with_regime(c, dom_regime, state)
+    ]
+
+    supplied_conflicted = False
     chosen: CandidateStructure | None = None
-    if default_primary is not None and _is_strict_eligible(default_primary):
-        chosen = default_primary
-    elif strict_eligible and detectors:
-        chosen = max(strict_eligible, key=lambda c: c.technical_options_score)
+    if default_primary is not None:
+        if is_candidate_compatible_with_regime(default_primary, dom_regime, state):
+            chosen = default_primary
+        else:
+            supplied_conflicted = _is_strict_eligible(default_primary) and dom_regime != "CONTESTED_WAIT"
+            chosen = None
+    elif compatible_eligible:
+        chosen = max(
+            compatible_eligible,
+            key=lambda c: (1 if c.direction == dom_regime else 0, c.technical_options_score),
+        )
 
     # 1. Bull Researcher Thesis
     touches_bull = [
@@ -427,11 +449,6 @@ def build_deterministic_personas(
         f"25d Put-Call skew={skew_pts:+.2f} vol pts. {vol_pref}"
     )
 
-    if chosen is not None:
-        dom_regime: Literal["BULLISH", "BEARISH", "NEUTRAL", "CONTESTED_WAIT"] = chosen.direction
-    else:
-        dom_regime = "CONTESTED_WAIT"
-
     rebuttal = (
         f"Synthesis rebuttal: Dominant regime resolved as `{dom_regime}`. "
         f"Technical structure (`{ps.trend_1d_state}`, RSI {ps.rsi_14_1h:.1f}) and options surface "
@@ -449,7 +466,7 @@ def build_deterministic_personas(
 
     # 4. Risk Management Triad
     if chosen is not None:
-        pool = strict_eligible if strict_eligible else [chosen]
+        pool = compatible_eligible if compatible_eligible else [chosen]
         top_edge = max(pool, key=lambda c: c.technical_options_score)
         lowest_gap = min(
             pool,
@@ -489,8 +506,22 @@ def build_deterministic_personas(
             f"combining Part A PASS compliance, Tech+Options Score {chosen.technical_options_score:.1f}/100, "
             f"and clear completed-candle invalidation at {chosen.invalidation_level:.2f}."
         )
+    elif supplied_conflicted:
+        convexity_note = (
+            f"Supplied candidate direction conflicts with confirmed `{dom_regime}` market regime; "
+            "no directional mismatch structure advocated."
+        )
+        tail_note = "Capital preservation takes precedence on regime-candidate conflict: zero new risk recommended."
+        arbiter_note = "Unanimous Risk Triad decision to sit out (`WAIT`) due to regime conflict."
+    elif dom_regime == "CONTESTED_WAIT":
+        convexity_note = (
+            "Market regime is `CONTESTED_WAIT` (missing confirmed regime signal or conflicting signals); "
+            "no structure advocated."
+        )
+        tail_note = "Capital preservation takes precedence: zero new risk recommended."
+        arbiter_note = "Unanimous Risk Triad decision to sit out (`WAIT`)."
     else:
-        convexity_note = "No Part-A-PASS structure available to advocate."
+        convexity_note = "No Part-A-PASS structure compatible with confirmed regime available to advocate."
         tail_note = "Capital preservation takes precedence: zero new risk recommended."
         arbiter_note = "Unanimous Risk Triad decision to sit out (`WAIT`)."
 
@@ -504,29 +535,46 @@ def build_deterministic_personas(
     if chosen is not None and dom_regime != "CONTESTED_WAIT":
         conviction: Literal["HIGH", "MODERATE", "SIT_OUT"] = (
             "HIGH"
-            if chosen.technical_options_score >= 68.0 and vol.ivp_90d != "UNKNOWN"
+            if (
+                chosen.technical_options_score >= 68.0
+                and vol.ivp_90d != "UNKNOWN"
+                and chosen.direction == dom_regime
+            )
             else "MODERATE"
         )
         rec_id = chosen.structure_id
         rationale = (
-            f"Consolidator selects `{chosen.structure_id}` ({chosen.structure_type}, {chosen.direction}, "
-            f"on `{chosen.expiry_date}`, {chosen.dte_trading_sessions} DTE, "
-            f"Tech+Opt Score {chosen.technical_options_score:.1f}/100) with {conviction} conviction. "
-            f"Technical `{ps.trend_1d_state}` structure (1H RSI {ps.rsi_14_1h:.1f}) and "
-            f"options surface (90d IVP {ivp_90}, 25d skew {skew_pts:+.2f} vol pts, {vol.term_structure_regime}) "
-            f"align with OI wall protection ({pos.put_oi_wall_strike:.0f} PE / {pos.call_oi_wall_strike:.0f} CE), "
-            f"while satisfying all binding Part A limits (contractual max loss Rs {chosen.contractual_max_loss_rs:,.2f}, "
+            f"Market regime assessed as `{dom_regime}` from `{ps.trend_1d_state}` structure "
+            f"(1H RSI {ps.rsi_14_1h:.1f}) and options surface (90d IVP {ivp_90}, 25d skew "
+            f"{skew_pts:+.2f} vol pts, {vol.term_structure_regime}, OI walls {pos.put_oi_wall_strike:.0f} PE / "
+            f"{pos.call_oi_wall_strike:.0f} CE). Consolidator selects `{chosen.structure_id}` "
+            f"({chosen.structure_type}, {chosen.direction}, on `{chosen.expiry_date}`, "
+            f"{chosen.dte_trading_sessions} DTE, Tech+Opt Score {chosen.technical_options_score:.1f}/100) "
+            f"with {conviction} conviction, satisfying all binding Part A limits "
+            f"(contractual max loss Rs {chosen.contractual_max_loss_rs:,.2f}, "
             f"margin estimate Rs {chosen.margin_estimate_rs:,.2f}, "
-            f"managed stop Rs {chosen.planned_stop_rs:,.2f}, summed portfolio stop Rs {chosen.portfolio_summed_stop_after_trade_rs:,.2f})."
+            f"managed stop Rs {chosen.planned_stop_rs:,.2f}, "
+            f"summed portfolio stop Rs {chosen.portfolio_summed_stop_after_trade_rs:,.2f})."
         )
     else:
         chosen = None
         conviction = "SIT_OUT"
         rec_id = "WAIT"
-        rationale = (
-            "Consolidator recommends `WAIT` (`SIT_OUT`): either no structure passed all binding Part A "
-            "gates or technical/volatility signals lack confirmed regime alignment."
-        )
+        if supplied_conflicted:
+            rationale = (
+                f"Consolidator recommends `WAIT` (`SIT_OUT`): market regime assessed as `{dom_regime}`, "
+                "and supplied candidate conflicts with confirmed market regime."
+            )
+        elif dom_regime == "CONTESTED_WAIT":
+            rationale = (
+                "Consolidator recommends `WAIT` (`SIT_OUT`): market regime is `CONTESTED_WAIT` "
+                "(missing confirmed regime signal or conflicting technical/volatility signals)."
+            )
+        else:
+            rationale = (
+                f"Consolidator recommends `WAIT` (`SIT_OUT`): market regime assessed as `{dom_regime}`, "
+                "and no compatible structure passed all binding Part A and full-size depth gates."
+            )
 
     is_live_ready_preview = is_pre_llm_live_ready_eligible(state, chosen)
     wa_digest = format_whatsapp_digest(
@@ -574,22 +622,18 @@ def build_verified_report_narrative(
     ps = state.market_evidence.price_structure
     vol = state.market_evidence.volatility_state
     pos = state.market_evidence.derivatives_positioning
+    dom_regime = assess_market_regime(state)
 
-    active_primary = (
-        selected_primary
-        if (
-            verdict == "SUGGESTION"
-            and verifier_passed
-            and selected_primary is not None
-            and _is_strict_eligible(selected_primary)
-        )
-        else None
-    )
-    active_eligible = list(eligible_candidates) if active_primary is not None else []
+    supplied_for_personas: CandidateStructure | None = None
+    active_eligible: list[CandidateStructure] = []
+    if verdict == "SUGGESTION" and verifier_passed and selected_primary is not None:
+        supplied_for_personas = selected_primary
+        if is_candidate_compatible_with_regime(selected_primary, dom_regime, state):
+            active_eligible = list(eligible_candidates)
 
     debate, triad, cons_base, chosen = build_deterministic_personas(
         state=state,
-        default_primary=active_primary,
+        default_primary=supplied_for_personas,
         eligible_candidates=active_eligible,
     )
 
@@ -616,9 +660,9 @@ def build_verified_report_narrative(
             whatsapp_digest=wa_digest,
         )
         reasoning = (
-            f"Spot is at {spot} (`contract_context.spot.value`). "
-            "Post-synthesis deterministic verification failed; actionable prose excluded and "
-            "verdict forced to `WAIT`."
+            f"Spot is at {spot} (`contract_context.spot.value`) with market regime assessed as "
+            f"`{debate.dominant_regime}`. Post-synthesis deterministic verification failed; "
+            "actionable prose excluded and verdict forced to `WAIT`."
         )
         habitual_note = "Excluded synthesis comparison prose due to deterministic verifier rejection."
         challenge_note = "None (verifier fail-closed `WAIT`)."
@@ -645,6 +689,7 @@ def build_verified_report_narrative(
         reasoning = (
             f"Spot is at {spot} (`contract_context.spot.value`) with 1D structure in "
             f"`{ps.trend_1d_state}` (`market_evidence.price_structure.trend_1d_state`), "
+            f"dominant market regime `{debate.dominant_regime}`, "
             f"completed 1H MA20 at {ps.ma20_1h} (`market_evidence.price_structure.ma20_1h`), "
             f"and 1H RSI(14) at {ps.rsi_14_1h} (`market_evidence.price_structure.rsi_14_1h`). "
             f"90-session IVP stands at {vol.ivp_90d} (`market_evidence.volatility_state.ivp_90d`) "
@@ -669,9 +714,10 @@ def build_verified_report_narrative(
             whatsapp_digest=wa_digest,
         )
         reasoning = (
-            f"Spot is at {spot} (`contract_context.spot.value`) with 1D trend `{ps.trend_1d_state}` "
-            f"and 90-session IVP at {vol.ivp_90d}. Consolidator recommends sitting out (`WAIT`): "
-            "no candidate satisfied both deterministic Part A rules, full-size depth, and multi-persona regime alignment."
+            f"Spot is at {spot} (`contract_context.spot.value`) with 1D trend `{ps.trend_1d_state}`, "
+            f"90-session IVP at {vol.ivp_90d}, and market regime assessed as `{debate.dominant_regime}`. "
+            "Consolidator recommends sitting out (`WAIT`): no candidate satisfied deterministic Part A "
+            "rules, full-size depth, and confirmed regime compatibility."
         )
 
     habitual_note = (
@@ -779,7 +825,9 @@ def normalize_state_narrative_from_verified_facts(state: NiftyOptionsState) -> N
 
     cand_by_id = {c.structure_id: c for c in state.candidate_structures}
     strict_eligible = [c for c in state.candidate_structures if _is_strict_eligible(c)]
+    dom_regime = assess_market_regime(state)
 
+    supplied_cand: CandidateStructure | None = None
     verified_primary: CandidateStructure | None = None
     if (
         fo.verdict == "SUGGESTION"
@@ -787,7 +835,8 @@ def normalize_state_narrative_from_verified_facts(state: NiftyOptionsState) -> N
         and fo.primary_proposal is not None
     ):
         canonical_cand = cand_by_id.get(fo.primary_proposal.structure_id, fo.primary_proposal)
-        if _is_strict_eligible(canonical_cand):
+        supplied_cand = canonical_cand
+        if is_candidate_compatible_with_regime(canonical_cand, dom_regime, state):
             verified_primary = canonical_cand
 
     effective_verdict: Literal["SUGGESTION", "WAIT"] = (
@@ -801,9 +850,9 @@ def normalize_state_narrative_from_verified_facts(state: NiftyOptionsState) -> N
 
     narrative = build_verified_report_narrative(
         state=state,
-        selected_primary=verified_primary,
+        selected_primary=(verified_primary if verified_primary is not None else supplied_cand),
         eligible_candidates=(strict_eligible if verified_primary is not None else []),
-        verdict=effective_verdict,
+        verdict=("SUGGESTION" if supplied_cand is not None else effective_verdict),
         is_live_ready=effective_live_ready,
         verifier_passed=fo.verifier_report.passed_verification,
         research_only_reason=fo.research_only_reason,
