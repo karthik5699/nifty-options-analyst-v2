@@ -37,6 +37,7 @@ from nifty_analyst.adapters.kotak_neo import (
     KotakAdapterError,
     KotakNeoReadOnlyPort,
     KotakRateLimit429Error,
+    KotakSharedStateError,
     LiveKotakNeoAdapter,
     ProvisionalSerialRateLimiter,
     parse_and_validate_option_chain,
@@ -690,16 +691,13 @@ def run_analyst_pipeline(
                         enforce_schedule_in_live_mode=False,
                     )
                 else:
-                    cooldown_path = (
-                        Path(config.cache_dir) / "kotak_429_cooldown.json"
+                    shared_state_dir = (
+                        Path(config.cache_dir)
                         if config.cache_dir
-                        else None
+                        else (Path.home() / "nifty-analyst")
                     )
-                    pacing_state_path = (
-                        Path(config.cache_dir) / "kotak_pacing_state.json"
-                        if config.cache_dir
-                        else None
-                    )
+                    cooldown_path = shared_state_dir / "kotak_429_cooldown.json"
+                    pacing_state_path = shared_state_dir / "kotak_pacing_state.json"
                     live_limiter = PacedReadTransport(
                         min_interval_seconds=config.kotak_min_request_interval_seconds,
                         max_queue_wait_seconds=config.kotak_max_queue_wait_seconds,
@@ -823,8 +821,8 @@ def run_analyst_pipeline(
                         decision_dt_ist=dec_ist,
                         max_staleness_seconds=config.max_quote_staleness_seconds,
                     )
-                except KotakRateLimit429Error:
-                    # HTTP 429 MUST hard-stop the entire run immediately with zero retry/probing
+                except (KotakRateLimit429Error, KotakSharedStateError):
+                    # HTTP 429 or shared-safety-state failure MUST hard-stop the entire run immediately
                     raise
                 except KotakAdapterError as exc:
                     per_expiry_coverage[exp_meta.expiry_date] = {

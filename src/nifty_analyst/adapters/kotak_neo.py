@@ -19,20 +19,26 @@ STRICT CONSTRAINTS (Implementation Plan v3, Sections 3 & 10 + 11 Nov Live Review
 from __future__ import annotations
 
 import abc
+import contextvars
 import datetime as dt
+import inspect
 import json
 import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, NoReturn, Sequence
 
 from nifty_analyst.adapters.request_safety import (
+    CooldownPersistence429Error,
     HttpRateLimit429Error,
     PacedCooldownActiveError,
     PacedQueueCapExceededError,
     PacedReadTransport,
     SharedPacedHttpTransport,
+    SharedSafetyStateError,
+    attach_paced_transport_to_client,
+    build_paced_client_transport,
     chunk_date_range,
     interpret_depth_book,
     normalize_contract_quote_timestamp,
@@ -50,6 +56,19 @@ class KotakAdapterError(RuntimeError):
 
 class KotakRateLimit429Error(KotakAdapterError):
     """Raised immediately on HTTP 429; halts the run with zero retry and zero probing."""
+
+
+class KotakSharedStateError(KotakAdapterError, SharedSafetyStateError):
+    """Raised (fail-closed) when shared pacing or 429 cooldown state is corrupt or unwritable."""
+
+
+class KotakCooldownPersistence429Error(KotakRateLimit429Error, KotakSharedStateError):
+    """Raised when HTTP 429 occurs AND persisting the shared cooldown state file fails."""
+
+
+_IN_AUTH_LOGIN_FLOW: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IN_AUTH_LOGIN_FLOW", default=False
+)
 
 
 class MissingQuoteTimestampError(KotakAdapterError):
@@ -886,15 +905,12 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 f"Kotak repo import failed at {self.kotak_api_root}: {exc}. "
                 "The pinned ~/Kotak_API checkout is required for the live adapter."
             )
-        self._auth = AuthManager(store=ConfigStore())
-        self._service = OptionChainService(auth_manager=self._auth)
         self.cache_dir = Path(cache_dir) if cache_dir else None
-        cooldown_file = (
-            self.cache_dir / "kotak_429_cooldown.json" if self.cache_dir is not None else None
+        shared_state_dir = (
+            self.cache_dir if self.cache_dir is not None else (Path.home() / "nifty-analyst")
         )
-        pacing_state_file = (
-            self.cache_dir / "kotak_pacing_state.json" if self.cache_dir is not None else None
-        )
+        cooldown_file = shared_state_dir / "kotak_429_cooldown.json"
+        pacing_state_file = shared_state_dir / "kotak_pacing_state.json"
         self.rate_limiter = rate_limiter or PacedReadTransport(
             min_interval_seconds=2.5,
             max_queue_wait_seconds=35.0,
@@ -903,6 +919,17 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             strict_guard_seconds=0.0,
             early_wake_guard_seconds=0.001,
         )
+        self._wired_auth_pairs: set[tuple[int, int]] = set()
+        auth_kwargs: dict[str, Any] = {"store": ConfigStore()}
+        try:
+            auth_sig = inspect.signature(AuthManager.__init__)
+            cf_param = auth_sig.parameters.get("client_factory")
+            if cf_param is not None and callable(cf_param.default):
+                auth_kwargs["client_factory"] = self._wrap_client_factory(cf_param.default)
+        except (TypeError, ValueError):
+            pass
+        self._auth = AuthManager(**auth_kwargs)
+        self._service = OptionChainService(auth_manager=self._auth)
         self.enforce_schedule = enforce_schedule_in_live_mode
         self.depth_strikes_each_side = depth_strikes_each_side
         self.quotes_batch_size = max(1, min(50, int(quotes_batch_size)))
@@ -913,10 +940,10 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         self.require_contract_quote_timestamp: bool = False
         self.max_quote_staleness_seconds: float = 180.0
         self.max_future_skew_seconds: float = 5.0
-        self._http_transport: SharedPacedHttpTransport | None = None
         self.adapter_call_count: int = 0
         self.cache_hit_count: int = 0
         self._cache: dict[str, Any] = {}
+        self._ensure_transport_wired()
 
     # ----- plumbing -----
 
@@ -926,40 +953,147 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             return ensure_ist(fn())
         return dt.datetime.now(tz=IST)
 
-    def _maybe_attach_http_boundary_transport(self, client: Any) -> None:
-        """Attach SharedPacedHttpTransport onto an authenticated NeoAPI httpx client if present."""
-        if not isinstance(getattr(self, "rate_limiter", None), PacedReadTransport):
+    def _wrap_client_factory(self, orig_factory: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap `AuthManager.client_factory` (`NeoAPI`) so EVERY fresh read-only client is constructed
+        with `SharedPacedHttpTransport` bound to `self.rate_limiter` (leaving TOTP login untouched).
+        """
+        pair_tag = (id(self), id(getattr(self, "rate_limiter", None)))
+        if getattr(orig_factory, "_nifty_analyst_factory_pair", None) == pair_tag:
+            return orig_factory
+
+        accepts_transport_kw = False
+        try:
+            for pname, pinfo in inspect.signature(orig_factory).parameters.items():
+                if pname == "transport" and pinfo.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    accepts_transport_kw = True
+                    break
+        except (TypeError, ValueError):
+            accepts_transport_kw = False
+
+        def _paced_client_factory(*args: Any, **kwargs: Any) -> Any:
+            lim = getattr(self, "rate_limiter", None)
+            if _IN_AUTH_LOGIN_FLOW.get() or not isinstance(lim, PacedReadTransport):
+                return orig_factory(*args, **kwargs)
+            call_kwargs = dict(kwargs)
+            if accepts_transport_kw and call_kwargs.get("transport") is not None:
+                paced_tr = build_paced_client_transport(
+                    lim,
+                    call_kwargs.get("transport"),
+                    http2=bool(call_kwargs.get("http2", True)),
+                    limits=call_kwargs.get("limits"),
+                    create_default_if_none=False,
+                )
+                if paced_tr is not None:
+                    call_kwargs["transport"] = paced_tr
+            client = orig_factory(*args, **call_kwargs)
+            attach_paced_transport_to_client(client, lim)
+            return client
+
+        setattr(_paced_client_factory, "_nifty_analyst_factory_pair", pair_tag)
+        return _paced_client_factory
+
+    def _wire_auth_object(self, auth_obj: Any) -> None:
+        """Idempotently wire `client_factory`, `require_authenticated_client`, and `login_with_daily_totp`."""
+        lim = getattr(self, "rate_limiter", None)
+        if auth_obj is None or not isinstance(lim, PacedReadTransport):
             return
-        candidates: list[tuple[Any, str]] = []
-        api_cli = getattr(client, "api_client", None)
-        rest_cli = getattr(api_cli, "rest_client", None) if api_cli is not None else None
-        httpx_cli = getattr(rest_cli, "_client", None) if rest_cli is not None else None
-        if httpx_cli is not None and hasattr(httpx_cli, "_transport"):
-            candidates.append((httpx_cli, "_transport"))
-        if hasattr(client, "_transport"):
-            candidates.append((client, "_transport"))
-        for holder, attr in candidates:
-            cur_tr = getattr(holder, attr, None)
-            if cur_tr is None or not hasattr(cur_tr, "handle_request"):
+        wired_pairs = getattr(self, "_wired_auth_pairs", None)
+        if wired_pairs is None:
+            wired_pairs = set()
+            self._wired_auth_pairs = wired_pairs
+        pair_key = (id(auth_obj), id(lim))
+        if pair_key in wired_pairs:
+            return
+        wired_pairs.add(pair_key)
+
+        # Preserve daily TOTP login (`POST` totp_login / totp_validate) completely untouched
+        login_fn = getattr(auth_obj, "login_with_daily_totp", None)
+        if callable(login_fn) and not getattr(login_fn, "_nifty_analyst_login_wrapped", False):
+
+            def _login_guard(*args: Any, _orig_login: Callable[..., Any] = login_fn, **kwargs: Any) -> Any:
+                tok = _IN_AUTH_LOGIN_FLOW.set(True)
+                try:
+                    return _orig_login(*args, **kwargs)
+                finally:
+                    _IN_AUTH_LOGIN_FLOW.reset(tok)
+
+            setattr(_login_guard, "_nifty_analyst_login_wrapped", True)
+            try:
+                setattr(auth_obj, "login_with_daily_totp", _login_guard)
+            except Exception:
+                pass
+
+        # 1. Wire `client_factory` at client construction boundary
+        cur_factory = getattr(auth_obj, "client_factory", None)
+        if callable(cur_factory):
+            try:
+                setattr(auth_obj, "client_factory", self._wrap_client_factory(cur_factory))
+                lim.http_boundary_attached = True
+            except Exception:
+                pass
+
+        # 2. Wire client-returning helper methods so even custom fresh-client helpers without
+        #    `client_factory` (or helpers that wrap `session._transport` after `client_factory`)
+        #    have `SharedPacedHttpTransport` attached on EVERY returned client.
+        for method_name in (
+            "require_authenticated_client",
+            "require_read_only_client",
+            "create_read_only_client",
+            "get_authenticated_client",
+            "create_authenticated_client",
+            "build_authenticated_client",
+            "get_client",
+            "create_client",
+            "build_client",
+            "_create_client",
+        ):
+            orig_m = getattr(auth_obj, method_name, None)
+            if not callable(orig_m):
                 continue
-            if isinstance(cur_tr, SharedPacedHttpTransport):
-                self._http_transport = cur_tr
-                return
-            wrapped = SharedPacedHttpTransport(cur_tr, self.rate_limiter)
-            setattr(holder, attr, wrapped)
-            self._http_transport = wrapped
-            return
+            if getattr(orig_m, "_nifty_analyst_method_pair", None) == pair_key:
+                continue
+
+            def _client_helper_wrapper(
+                *args: Any,
+                _orig: Callable[..., Any] = orig_m,
+                **kwargs: Any,
+            ) -> Any:
+                res = _orig(*args, **kwargs)
+                cur_lim = getattr(self, "rate_limiter", None)
+                if not _IN_AUTH_LOGIN_FLOW.get() and isinstance(cur_lim, PacedReadTransport):
+                    cli = res[0] if isinstance(res, tuple) and res else res
+                    attach_paced_transport_to_client(cli, cur_lim)
+                return res
+
+            setattr(_client_helper_wrapper, "_nifty_analyst_method_pair", pair_key)
+            try:
+                setattr(auth_obj, method_name, _client_helper_wrapper)
+            except Exception:
+                pass
+
+    def _ensure_transport_wired(self) -> None:
+        self._wire_auth_object(getattr(self, "_auth", None))
+        svc = getattr(self, "_service", None)
+        if svc is not None:
+            for svc_auth_attr in ("auth", "_auth", "auth_manager", "_auth_manager"):
+                self._wire_auth_object(getattr(svc, svc_auth_attr, None))
+
+    def _acquire_authenticated_client(self) -> Any:
+        self._ensure_transport_wired()
+        res = self._auth.require_authenticated_client()
+        cli = res[0] if isinstance(res, tuple) and res else res
+        lim = getattr(self, "rate_limiter", None)
+        if isinstance(lim, PacedReadTransport):
+            attach_paced_transport_to_client(cli, lim)
+        return cli
 
     @property
     def http_request_count(self) -> int:
-        tr = getattr(self, "_http_transport", None)
-        if tr is not None:
-            return int(tr.http_request_count)
         lim = getattr(self, "rate_limiter", None)
-        http_c = int(getattr(lim, "http_request_count", 0) or 0)
-        if http_c > 0 or getattr(lim, "http_boundary_attached", False):
-            return http_c
-        return int(getattr(lim, "request_count", 0) or 0)
+        return int(getattr(lim, "http_request_count", 0) or 0)
 
     def _assert_schedule_approved(self, decision_dt_ist: dt.datetime) -> dt.datetime:
         dec_ist = ensure_ist(decision_dt_ist)
@@ -975,51 +1109,101 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             )
         return dec_ist
 
-    def _guard_request(self, cache_key: str, decision_dt_ist: dt.datetime) -> None:
+    def _raise_mapped_transport_error(self, exc: BaseException) -> NoReturn:
+        if isinstance(exc, KotakAdapterError):
+            raise exc
+        if isinstance(exc, CooldownPersistence429Error):
+            raise KotakCooldownPersistence429Error(str(exc)) from exc
+        if isinstance(exc, SharedSafetyStateError):
+            raise KotakSharedStateError(str(exc)) from exc
+        if isinstance(exc, (HttpRateLimit429Error, PacedCooldownActiveError)):
+            raise KotakRateLimit429Error(str(exc)) from exc
+        if isinstance(exc, PacedQueueCapExceededError):
+            raise KotakAdapterError(str(exc)) from exc
+        raise KotakAdapterError(str(exc)) from exc
+
+    def _guard_request(self, cache_key: str, decision_dt_ist: dt.datetime) -> bool:
         self._assert_schedule_approved(decision_dt_ist)
-        if cache_key not in self._cache:
-            try:
-                if getattr(self.rate_limiter, "http_boundary_attached", False):
-                    chk = getattr(self.rate_limiter, "check_persisted_429_cooldown", None)
-                    if callable(chk):
-                        chk()
-                else:
-                    self.rate_limiter.wait_for_slot()
-            except PacedCooldownActiveError as exc:
-                raise KotakRateLimit429Error(str(exc)) from exc
-            except PacedQueueCapExceededError as exc:
-                raise KotakAdapterError(str(exc)) from exc
+        if cache_key in self._cache:
+            return False
+        try:
+            if getattr(self.rate_limiter, "http_boundary_attached", False):
+                chk = getattr(self.rate_limiter, "check_persisted_429_cooldown", None)
+                if callable(chk):
+                    chk()
+                return False
+            self.rate_limiter.wait_for_slot()
+            return True
+        except (
+            CooldownPersistence429Error,
+            SharedSafetyStateError,
+            HttpRateLimit429Error,
+            PacedCooldownActiveError,
+            PacedQueueCapExceededError,
+        ) as exc:
+            self._raise_mapped_transport_error(exc)
 
     def _record_429_if_supported(self, reason: str) -> None:
         rec_fn = getattr(self.rate_limiter, "record_429_cooldown", None)
         if callable(rec_fn):
-            rec_fn(reason)
+            try:
+                rec_fn(reason)
+            except SharedSafetyStateError as state_exc:
+                raise KotakCooldownPersistence429Error(
+                    f"HTTP 429 from Kotak Neo API ({reason[:160]}) AND failed to persist "
+                    f"shared cooldown state: {state_exc}"
+                ) from state_exc
 
     def _call(self, cache_key: str, decision_dt_ist: dt.datetime, fn: Callable[[], Any]) -> Any:
         self.adapter_call_count = int(getattr(self, "adapter_call_count", 0)) + 1
-        try:
-            auth_obj = getattr(self, "_auth", None)
-            if auth_obj is not None and hasattr(auth_obj, "require_authenticated_client"):
-                cli_peek, _, _ = auth_obj.require_authenticated_client()
-                self._maybe_attach_http_boundary_transport(cli_peek)
-        except Exception:
-            pass
+        self._ensure_transport_wired()
 
-        self._guard_request(cache_key, decision_dt_ist)
+        acquired_pre_slot = self._guard_request(cache_key, decision_dt_ist)
         if cache_key in self._cache:
             self.cache_hit_count = int(getattr(self, "cache_hit_count", 0)) + 1
             return self._cache[cache_key]
+
+        lim = getattr(self, "rate_limiter", None)
+        if hasattr(lim, "_call_aborted_error"):
+            lim._call_aborted_error = None
+        if acquired_pre_slot and hasattr(lim, "_pending_pre_guard_slot"):
+            lim._pending_pre_guard_slot = True
+
         try:
             resp = fn()
+            swallowed_abort = getattr(lim, "_call_aborted_error", None)
+            if swallowed_abort is not None:
+                lim._call_aborted_error = None
+                self._raise_mapped_transport_error(swallowed_abort)
         except KotakAdapterError:
+            swallowed_abort = getattr(lim, "_call_aborted_error", None)
+            if swallowed_abort is not None:
+                lim._call_aborted_error = None
+                if isinstance(
+                    swallowed_abort,
+                    (CooldownPersistence429Error, HttpRateLimit429Error, SharedSafetyStateError),
+                ):
+                    self._raise_mapped_transport_error(swallowed_abort)
             raise
-        except HttpRateLimit429Error as exc:
-            raise KotakRateLimit429Error(str(exc)) from exc
-        except PacedCooldownActiveError as exc:
-            raise KotakRateLimit429Error(str(exc)) from exc
-        except PacedQueueCapExceededError as exc:
-            raise KotakAdapterError(str(exc)) from exc
+        except (
+            CooldownPersistence429Error,
+            SharedSafetyStateError,
+            HttpRateLimit429Error,
+            PacedCooldownActiveError,
+            PacedQueueCapExceededError,
+        ) as exc:
+            if hasattr(lim, "_call_aborted_error"):
+                lim._call_aborted_error = None
+            self._raise_mapped_transport_error(exc)
         except Exception as exc:
+            swallowed_abort = getattr(lim, "_call_aborted_error", None)
+            if hasattr(lim, "_call_aborted_error"):
+                lim._call_aborted_error = None
+            if isinstance(
+                swallowed_abort,
+                (CooldownPersistence429Error, HttpRateLimit429Error, SharedSafetyStateError),
+            ):
+                self._raise_mapped_transport_error(swallowed_abort)
             msg = str(exc)
             if "429" in msg or "too many" in msg.lower():
                 self._record_429_if_supported(msg)
@@ -1027,6 +1211,12 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     f"HTTP 429 from Kotak Neo API ({msg[:200]}). Hard stop; zero retries."
                 ) from exc
             raise KotakAdapterError(f"Kotak SDK call failed ({cache_key}): {msg}") from exc
+        finally:
+            if hasattr(lim, "_pending_pre_guard_slot"):
+                lim._pending_pre_guard_slot = False
+            if hasattr(lim, "_call_aborted_error"):
+                lim._call_aborted_error = None
+
         if isinstance(resp, dict):
             status = str(resp.get("status") or resp.get("stCode") or "")
             if "429" in status:
@@ -1076,25 +1266,26 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 spot_val = None
 
         if spot_val is None:
-            client, _, _ = self._auth.require_authenticated_client()
             fetch_spot_fn = getattr(self._service, "_fetch_spot_quote", None)
             if callable(fetch_spot_fn):
                 spot_payload = self._call(
                     f"spot_index:{dec_ist.isoformat()}",
                     dec_ist,
-                    lambda: fetch_spot_fn(client, "NIFTY"),
-                )
-            elif hasattr(client, "quotes"):
-                spot_batch = validate_quotes_batch(
-                    [{"exchange_segment": "nse_cm", "instrument_token": "Nifty 50"}]
-                )
-                spot_payload = self._call(
-                    f"spot_index:{dec_ist.isoformat()}",
-                    dec_ist,
-                    lambda: client.quotes(instrument_tokens=spot_batch, quote_type="all"),
+                    lambda: fetch_spot_fn(self._acquire_authenticated_client(), "NIFTY"),
                 )
             else:
-                spot_payload = None
+                spot_client = self._acquire_authenticated_client()
+                if hasattr(spot_client, "quotes"):
+                    spot_batch = validate_quotes_batch(
+                        [{"exchange_segment": "nse_cm", "instrument_token": "Nifty 50"}]
+                    )
+                    spot_payload = self._call(
+                        f"spot_index:{dec_ist.isoformat()}",
+                        dec_ist,
+                        lambda: spot_client.quotes(instrument_tokens=spot_batch, quote_type="all"),
+                    )
+                else:
+                    spot_payload = None
 
             cand_spot: float | None = None
             if isinstance(spot_payload, dict) and spot_payload.get("ltp") is not None:
@@ -1144,18 +1335,26 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         neo_symbols: Sequence[str],
         expiry_date: str,
         dec_ist: dt.datetime,
+        *,
+        initial_client: Any = None,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
         """Fetch `client.quotes(..., quote_type='all')` in verified small batches (default 2 tokens).
 
-        Standing API rule: HTTP 429 or session errors hard-stop immediately with zero retries;
-        a transient non-429 quote failure gets at most ONE retry after `quote_retry_delay_seconds`
-        (default 30.0s) and is then flagged in `failed_errors` (never treated as 0.0).
+        Standing API rule: HTTP 429, shared-state errors, or session errors hard-stop immediately
+        with zero retries; a transient non-429 quote failure gets at most ONE retry after
+        `quote_retry_delay_seconds` (default 30.0s) and is then flagged in `failed_errors`.
         """
         if not neo_symbols:
             return {}, {}
-        client, _, _ = self._auth.require_authenticated_client()
-        if not hasattr(client, "quotes"):
+        first_cli = initial_client if initial_client is not None else self._acquire_authenticated_client()
+        if not hasattr(first_cli, "quotes"):
             return {}, {}
+        seeded_clients: list[Any] = [first_cli]
+
+        def _next_quotes_client() -> Any:
+            if seeded_clients:
+                return seeded_clients.pop(0)
+            return self._acquire_authenticated_client()
 
         tokens: list[tuple[str, dict[str, str]]] = []
         for ns in neo_symbols:
@@ -1180,9 +1379,11 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 resp = self._call(
                     f"quotes:{expiry_date}:{dec_ist.isoformat()}:{batch_id}",
                     dec_ist,
-                    lambda b=validated_batch: client.quotes(instrument_tokens=b, quote_type="all"),
+                    lambda b=validated_batch: _next_quotes_client().quotes(
+                        instrument_tokens=b, quote_type="all"
+                    ),
                 )
-            except (KotakRateLimit429Error, UnapprovedScheduleSlotError):
+            except (KotakRateLimit429Error, KotakSharedStateError, UnapprovedScheduleSlotError):
                 raise
             except KotakAdapterError as first_exc:
                 if "re-authentication" in str(first_exc) or "queue cap" in str(first_exc).lower():
@@ -1193,9 +1394,11 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     resp = self._call(
                         f"quotes:{expiry_date}:{dec_ist.isoformat()}:{batch_id}:retry1",
                         dec_ist,
-                        lambda b=validated_batch: client.quotes(instrument_tokens=b, quote_type="all"),
+                        lambda b=validated_batch: _next_quotes_client().quotes(
+                            instrument_tokens=b, quote_type="all"
+                        ),
                     )
-                except (KotakRateLimit429Error, UnapprovedScheduleSlotError):
+                except (KotakRateLimit429Error, KotakSharedStateError, UnapprovedScheduleSlotError):
                     raise
                 except KotakAdapterError as retry_exc:
                     if "re-authentication" in str(retry_exc) or "queue cap" in str(retry_exc).lower():
@@ -1233,7 +1436,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         fetch_depth: bool = True,
         max_depth_tokens_override: int | None = None,
     ) -> dict[str, Any]:
-        dec_ist = ensure_ist(decision_dt_ist)
+        dec_ist = self._assert_schedule_approved(decision_dt_ist)
         fetch_started_dt = self._now_ist()
         strike_count = int(getattr(self, "depth_strikes_each_side", 40))
         # Never pass include_depth=True: OptionChainService._fetch_depth_by_neosymbol uses
@@ -1290,13 +1493,17 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             else []
         )
 
-        client_obj, _, _ = self._auth.require_authenticated_client()
-        client_supports_quotes = bool(shortlisted_neos and hasattr(client_obj, "quotes"))
+        initial_quotes_cli = self._acquire_authenticated_client() if shortlisted_neos else None
+        client_supports_quotes = bool(
+            shortlisted_neos and initial_quotes_cli is not None and hasattr(initial_quotes_cli, "quotes")
+        )
         requested_neos: list[str] = list(shortlisted_neos) if client_supports_quotes else []
         requested_set = set(requested_neos)
 
         quotes_map, failed_quote_errors = (
-            self._fetch_targeted_quotes_by_neosymbol(requested_neos, expiry_date, dec_ist)
+            self._fetch_targeted_quotes_by_neosymbol(
+                requested_neos, expiry_date, dec_ist, initial_client=initial_quotes_cli
+            )
             if requested_neos
             else ({}, {})
         )
@@ -1767,8 +1974,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         }
 
     def fetch_index_candles_raw(self, decision_dt_ist: dt.datetime) -> dict[str, Any]:
-        dec_ist = ensure_ist(decision_dt_ist)
-        client, _, _ = self._auth.require_authenticated_client()
+        dec_ist = self._assert_schedule_approved(decision_dt_ist)
         neosymbol = "nse_cm|Nifty 50"
 
         upstream_validate: Callable[..., Any] | None = None
@@ -1791,7 +1997,7 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             return self._call(
                 f"hist:{neosymbol}:{interval}:{from_str}:{to_str}",
                 dec_ist,
-                lambda: client.historical_data(
+                lambda: self._acquire_authenticated_client().historical_data(
                     neosymbol=neosymbol,
                     interval=interval,
                     from_date=from_str,

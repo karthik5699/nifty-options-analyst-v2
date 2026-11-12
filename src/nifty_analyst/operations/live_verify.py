@@ -174,15 +174,18 @@ def verify_live_dry_run_step(
 
 def _build_supervised_live_adapter(config: AnalystConfig, batch_size: int) -> LiveKotakNeoAdapter:
     holidays, _ = load_nse_holiday_calendar(config.resolved_holidays_path())
-    cooldown_path = (
-        Path(config.cache_dir) / "kotak_429_cooldown.json"
+    shared_state_dir = (
+        Path(config.cache_dir)
         if config.cache_dir
-        else Path.home() / "nifty-analyst" / "kotak_429_cooldown.json"
+        else Path.home() / "nifty-analyst"
     )
+    cooldown_path = shared_state_dir / "kotak_429_cooldown.json"
+    pacing_state_path = shared_state_dir / "kotak_pacing_state.json"
     limiter = PacedReadTransport(
         min_interval_seconds=config.kotak_min_request_interval_seconds,
         max_queue_wait_seconds=config.kotak_max_queue_wait_seconds,
         cooldown_file_path=cooldown_path,
+        pacing_state_file_path=pacing_state_path,
     )
     return LiveKotakNeoAdapter(
         kotak_api_root=config.kotak_api_root or None,

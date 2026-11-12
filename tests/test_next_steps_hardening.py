@@ -3684,38 +3684,53 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
                 if t["instrument_token"] in quotes_by_tok
             ]
 
-    cli_ok = _HttpBoundClient(wire_ok)
+    created_ok_clients: list[_HttpBoundClient] = []
+
+    class _FreshAuthOk:
+        def require_authenticated_client(self) -> tuple[_HttpBoundClient, None, None]:
+            c = _HttpBoundClient(wire_ok)
+            created_ok_clients.append(c)
+            return (c, None, None)
+
+    auth_ok = _FreshAuthOk()
 
     class _CompoundService:
+        def __init__(self, auth: Any) -> None:
+            self.auth = auth
+
         def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-            cli_ok.api_client.rest_client._client._transport.handle_request(
+            cli, _, _ = self.auth.require_authenticated_client()
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", "/scrip-master/expiries")
             )
             return {"status": "OK", "expiries": list(exp_18[:3])}
 
         def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             # Compound wrapper call: issues TWO internal HTTP GET requests (scripmaster + quotes)
-            cli_ok.api_client.rest_client._client._transport.handle_request(
+            cli, _, _ = self.auth.require_authenticated_client()
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", "/futures/lookup")
             )
-            cli_ok.api_client.rest_client._client._transport.handle_request(
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", "/futures/quotes")
             )
             return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
 
         def get_full_option_chain(self, symbol: str, expiry: str | None = None, **kw: Any) -> dict[str, Any]:
-            # Compound wrapper call: issues TWO internal HTTP GET requests (chain + underlying)
-            cli_ok.api_client.rest_client._client._transport.handle_request(
+            # Compound wrapper call: issues TWO internal HTTP GET requests across fresh clients
+            cli1, _, _ = self.auth.require_authenticated_client()
+            cli1.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", f"/option-chain/{expiry}")
             )
-            cli_ok.api_client.rest_client._client._transport.handle_request(
+            cli2, _, _ = self.auth.require_authenticated_client()
+            cli2.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", f"/option-chain/{expiry}/spot")
             )
             return chains_by_exp[str(expiry or exp_18[0])]
 
     adp = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
-    adp._service = _CompoundService()
-    adp._auth = type("_A", (), {"require_authenticated_client": lambda self: (cli_ok, None, None)})()
+    adp._auth = auth_ok
+    adp._service = _CompoundService(auth_ok)
     adp.rate_limiter = pacer_ok
     adp.enforce_schedule = True
     adp.depth_strikes_each_side = 40
@@ -3733,7 +3748,11 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
     # 1 chain wrapper call (2 GETs) + 2 quote batch calls (2 GETs) = 3 adapter calls, 4 HTTP GETs!
     adp.fetch_option_chain_raw("2026-11-12", dec_dt)
 
-    assert isinstance(cli_ok.api_client.rest_client._client._transport, SharedPacedHttpTransport)
+    assert len(created_ok_clients) >= 5
+    assert all(
+        isinstance(c.api_client.rest_client._client._transport, SharedPacedHttpTransport)
+        for c in created_ok_clients
+    )
     assert adp.adapter_call_count == 7  # 2 + 2 cached + 3
     assert adp.cache_hit_count == 2
     assert adp.http_request_count == 7  # 3 + 0 + 4 == len(wire_ok.wire_urls)
@@ -3742,8 +3761,8 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
     assert (adp.adapter_call_count - adp.cache_hit_count) == 5
     assert adp.http_request_count != (adp.adapter_call_count - adp.cache_hit_count)
 
-    # Every consecutive HTTP request start gap is strictly >= 2.500000s despite 2.499862s OS early wakeups!
-    ts_list = cli_ok.api_client.rest_client._client._transport.http_request_timestamps
+    # Every consecutive HTTP request start gap across fresh clients is strictly >= 2.500000s!
+    ts_list = pacer_ok.http_request_timestamps
     assert len(ts_list) == 7
     gaps = [ts_list[i] - ts_list[i - 1] for i in range(1, len(ts_list))]
     assert all(g >= 2.5 for g in gaps), f"Expected strict >= 2.5s gaps, got {gaps}"
@@ -3765,7 +3784,7 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
 
     # Read-only transport blocks non-GET methods before touching the wire
     with pytest.raises(PermissionError, match="non-GET"):
-        cli_ok.api_client.rest_client._client._transport.handle_request(
+        created_ok_clients[-1].api_client.rest_client._client._transport.handle_request(
             _FakeReq("POST", "/orders/place")
         )
     assert len(wire_ok.wire_urls) == 7
@@ -3780,7 +3799,6 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
         wall_time_fn=lambda: wall_now[0],
         sleep_fn=lambda s: (_ for _ in ()).throw(AssertionError(f"Unexpected retry sleep {s}s on 429")),
     )
-    cli_429 = _HttpBoundClient(wire_429)
 
     class _Cli429Full(_HttpBoundClient):
         def historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -3789,30 +3807,40 @@ def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_h
             )
             return list(candles_by_ivl[kwargs["interval"]])
 
-    cli_429_full = _Cli429Full(wire_429)
+    class _FreshAuth429:
+        def require_authenticated_client(self) -> tuple[_Cli429Full, None, None]:
+            return (_Cli429Full(wire_429), None, None)
+
+    auth_429 = _FreshAuth429()
 
     class _Svc429:
+        def __init__(self, auth: Any) -> None:
+            self.auth = auth
+
         def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-            cli_429_full.api_client.rest_client._client._transport.handle_request(
+            cli, _, _ = self.auth.require_authenticated_client()
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", "/scrip-master/expiries")
             )
             return {"status": "OK", "expiries": list(exp_18[:3])}
 
         def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-            cli_429_full.api_client.rest_client._client._transport.handle_request(
+            cli, _, _ = self.auth.require_authenticated_client()
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", "/futures/quotes")
             )
             return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
 
         def get_full_option_chain(self, symbol: str, expiry: str | None = None, **kw: Any) -> dict[str, Any]:
-            cli_429_full.api_client.rest_client._client._transport.handle_request(
+            cli, _, _ = self.auth.require_authenticated_client()
+            cli.api_client.rest_client._client._transport.handle_request(
                 _FakeReq("GET", f"/option-chain/{expiry}")
             )
             return chains_by_exp[str(expiry or exp_18[0])]
 
     adp_429 = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
-    adp_429._service = _Svc429()
-    adp_429._auth = type("_A", (), {"require_authenticated_client": lambda self: (cli_429_full, None, None)})()
+    adp_429._auth = auth_429
+    adp_429._service = _Svc429(auth_429)
     adp_429.rate_limiter = pacer_429
     adp_429.enforce_schedule = True
     adp_429.depth_strikes_each_side = 40
@@ -3946,5 +3974,1083 @@ def test_kotak_handoff_acceptance5_6_7_selection_binding_independent_regime_and_
     assert sig_slot.parameters["suppress_trader_alerts"].default is True
 
 
+def test_kotak_client_creation_wiring_fresh_clients_session_transport_and_separate_pacer_replaced(
+    tmp_path: Path,
+) -> None:
+    """Regression 1: Wire SharedPacedHttpTransport at client creation so fresh clients created per
+    request (`AuthManager.require_authenticated_client` + `NeoAPI` `rest_client.session._transport`
+    with `__del__` session close) share one pacer and counter (`http_request_count > 0`), peel any
+    existing separate wrapper/SDK pacing, keep `login_with_daily_totp` (`POST`) untouched, and
+    surface 429s even if swallowed inside `_fetch_spot_quote`.
+    """
+    import sys as _sys
+
+    from nifty_analyst.adapters.kotak_neo import (
+        KotakRateLimit429Error,
+        LiveKotakNeoAdapter,
+    )
+    from nifty_analyst.adapters.request_safety import SharedPacedHttpTransport
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    chains_by_exp, quotes_by_tok, exp_18 = _build_synthetic_multi_expiry_env(
+        spot=25000.0, mkt_lot=65, quote_lstup_epoch=1793940298
+    )
+    candles_by_ivl = _build_synthetic_candles_for_dec(dec_dt.date())
+
+    # 1A. Real `LiveKotakNeoAdapter(...)` constructor against a `kotak_option_chain` repo that
+    #     creates a BRAND-NEW `NeoAPI` (`rest_client.session._transport`) on every single
+    #     `require_authenticated_client()` call AND attaches an existing separate pacer!
+    fake_repo = tmp_path / "fake_kotak_repo"
+    pkg_dir = fake_repo / "kotak_option_chain"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    (pkg_dir / "auth.py").write_text(
+        '''from __future__ import annotations
+from typing import Any
+
+WIRE_LOG: list[tuple[str, str]] = []
+SEPARATE_PACER_CALLS: list[str] = []
+SDK_LIMITER_CALLS: list[str] = []
+CREATED_CLIENTS: list[Any] = []
+FAIL_429_URL_SUBSTR: str | None = None
 
 
+class _FakeReq:
+    def __init__(self, method: str, url: str) -> None:
+        self.method = method
+        self.url = url
+
+
+class _FakeResp:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+
+
+class WireHttpTransport:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def handle_request(self, request: Any) -> _FakeResp:
+        WIRE_LOG.append((request.method, request.url))
+        if FAIL_429_URL_SUBSTR and FAIL_429_URL_SUBSTR in request.url:
+            return _FakeResp(status_code=429)
+        return _FakeResp(status_code=200)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ExistingSeparatePacerTransport:
+    """Simulates an existing separate wrapper pacer attached inside AuthManager."""
+
+    def __init__(self, inner_transport: Any, min_interval: float = 2.5) -> None:
+        self._transport = inner_transport
+        self.min_interval = min_interval
+
+    def handle_request(self, request: Any) -> Any:
+        SEPARATE_PACER_CALLS.append(f"{request.method} {request.url}")
+        return self._transport.handle_request(request)
+
+    def close(self) -> None:
+        if hasattr(self._transport, "close"):
+            self._transport.close()
+
+
+class ExistingSdkRateLimiter:
+    def acquire(self, timeout: float = 30.0) -> None:
+        SDK_LIMITER_CALLS.append("acquire")
+
+
+class FakeHttpxSession:
+    def __init__(self, transport: Any = None) -> None:
+        self._transport = transport if transport is not None else WireHttpTransport()
+        self._mounts: dict[str, Any] = {}
+        self.closed = False
+
+    def request(self, method: str, url: str) -> Any:
+        return self._transport.handle_request(_FakeReq(method, url))
+
+    def close(self) -> None:
+        self.closed = True
+        if hasattr(self._transport, "close"):
+            self._transport.close()
+
+
+class FakeRESTClientObject:
+    def __init__(self, transport: Any = None) -> None:
+        self._transport = transport
+        self.session = FakeHttpxSession(transport=transport)
+        self.rate_limiter: Any = ExistingSdkRateLimiter()
+        self.request_count = 0
+
+    def request(self, method: str, url: str) -> Any:
+        self.request_count += 1
+        if self.rate_limiter is not None:
+            self.rate_limiter.acquire(timeout=30.0)
+        return self.session.request(method, url)
+
+    def __del__(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
+
+class FakeConfig:
+    consumer_key = "DUMMY"
+    view_token = "DUMMY"
+    sid = "DUMMY"
+    edit_token = "DUMMY"
+    edit_sid = "DUMMY"
+    edit_rid = "DUMMY"
+    base_url = "https://example.invalid"
+    data_center = "E21"
+    ucc = "DUMMY"
+
+
+class FakeNeoAPI:
+    QUOTES_DB: dict[str, Any] = {}
+    CANDLES_DB: dict[str, Any] = {}
+
+    def __init__(
+        self,
+        consumer_key: str | None = None,
+        environment: str = "prod",
+        access_token: str | None = None,
+        neo_fin_key: str | None = None,
+        transport: Any = None,
+        limits: Any = None,
+        http2: bool = True,
+        timeout: float | None = None,
+    ) -> None:
+        self.configuration = FakeConfig()
+        rest_cli = FakeRESTClientObject(transport=transport)
+        self.api_client = type("_ApiCli", (), {"rest_client": rest_cli})()
+        self.created_for_login = False
+        CREATED_CLIENTS.append(self)
+
+    @property
+    def request_count(self) -> int:
+        return int(self.api_client.rest_client.request_count)
+
+    def totp_login(self, **kwargs: Any) -> dict[str, Any]:
+        self.created_for_login = True
+        self.api_client.rest_client.request("POST", "/login/1.0/totp_login")
+        return {"data": {"token": "vtok", "sid": "vsid"}}
+
+    def totp_validate(self, **kwargs: Any) -> dict[str, Any]:
+        self.created_for_login = True
+        self.api_client.rest_client.request("POST", "/login/1.0/totp_validate")
+        return {"data": {"token": "etok", "sid": "esid", "baseUrl": "https://example.invalid"}}
+
+    def option_chain(self, **kwargs: Any) -> dict[str, Any]:
+        itype = kwargs.get("instrument_type", "opt")
+        exp = kwargs.get("expiry") or "nearest"
+        self.api_client.rest_client.request("GET", f"/option-chain/{itype}/{exp}")
+        return {"status": "OK"}
+
+    def quotes(self, instrument_tokens: list[dict[str, str]], quote_type: str = "all") -> list[dict[str, Any]]:
+        toks = ",".join(t["instrument_token"] for t in instrument_tokens)
+        self.api_client.rest_client.request("GET", f"/quotes/{quote_type}/{toks}")
+        out = []
+        for t in instrument_tokens:
+            tok = t["instrument_token"]
+            if tok == "Nifty 50":
+                out.append({"ltp": "25000.0", "exchange": "nse_cm", "display_symbol": "NIFTY"})
+            elif tok in self.QUOTES_DB:
+                out.append(self.QUOTES_DB[tok])
+        return out
+
+    def historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
+        ivl = kwargs["interval"]
+        self.api_client.rest_client.request("GET", f"/historical/{ivl}/{kwargs['from_date']}..{kwargs['to_date']}")
+        return list(self.CANDLES_DB[ivl])
+
+
+class ConfigStore:
+    pass
+
+
+class AuthManager:
+    def __init__(self, store: ConfigStore | None = None, client_factory: Any = FakeNeoAPI) -> None:
+        self.store = store or ConfigStore()
+        self.client_factory = client_factory
+
+    def login_with_daily_totp(self, totp: str, now: Any = None) -> dict[str, Any]:
+        cli = self.client_factory(consumer_key="DUMMY", environment="prod")
+        cli.totp_login(totp=totp)
+        cli.totp_validate(mpin="000000")
+        return {"status": "AUTHENTICATED", "ready": True}
+
+    def require_authenticated_client(self, now: Any = None) -> tuple[Any, None, None]:
+        # Creates a BRAND-NEW client on EVERY call AND wraps session._transport with separate pacer!
+        cli = self.client_factory(consumer_key="DUMMY", environment="prod")
+        sess = cli.api_client.rest_client.session
+        sess._transport = ExistingSeparatePacerTransport(sess._transport, min_interval=2.5)
+        return (cli, None, None)
+''',
+        encoding="utf-8",
+    )
+
+    (pkg_dir / "option_chain.py").write_text(
+        '''from __future__ import annotations
+from typing import Any
+
+CHAINS_DB: dict[str, Any] = {}
+EXPIRIES_LIST: list[str] = []
+
+
+class OptionChainService:
+    def __init__(self, auth_manager: Any) -> None:
+        self.auth = auth_manager
+
+    def get_expiries(self, underlying: str, exchange: str = "nse_fo", instrument_type: str = "option") -> dict[str, Any]:
+        client, _, _ = self.auth.require_authenticated_client()
+        client.api_client.rest_client.request("GET", "/scrip-master/file-paths")
+        return {"status": "OK", "expiries": list(EXPIRIES_LIST)}
+
+    def get_futures_chain(self, underlying: str, exchange: str = "nse_fo") -> dict[str, Any]:
+        client, _, _ = self.auth.require_authenticated_client()
+        client.option_chain(exchange=exchange, underlying=underlying, instrument_type="fut")
+        return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+    def _fetch_spot_quote(self, client: Any, symbol: str) -> dict[str, Any] | None:
+        try:
+            resp = client.quotes(
+                instrument_tokens=[{"exchange_segment": "nse_cm", "instrument_token": "Nifty 50"}],
+                quote_type="all",
+            )
+            if resp:
+                return {"ltp": float(resp[0]["ltp"])}
+        except Exception:
+            # Mirrors real kotak_option_chain/option_chain.py lines 258-259!
+            pass
+        return None
+
+    def get_full_option_chain(self, symbol: str, exchange: str = "nse_fo", expiry: str | None = None, count: int = 40) -> dict[str, Any]:
+        # Mirrors real OptionChainService: fresh client #1 for chain + spot, fresh client #2 inside get_futures_chain!
+        client, _, _ = self.auth.require_authenticated_client()
+        exp_key = str(expiry or EXPIRIES_LIST[0])
+        client.option_chain(exchange=exchange, underlying=symbol, expiry=exp_key, instrument_type="opt")
+        self._fetch_spot_quote(client, symbol)
+        self.get_futures_chain(symbol, exchange=exchange)
+        return CHAINS_DB[exp_key]
+''',
+        encoding="utf-8",
+    )
+
+    saved_modules = {
+        k: _sys.modules.get(k)
+        for k in ("kotak_option_chain", "kotak_option_chain.auth", "kotak_option_chain.option_chain")
+    }
+    for k in list(saved_modules.keys()):
+        _sys.modules.pop(k, None)
+
+    mono_now = [10.0]
+    wall_now = [1_794_455_565.0]
+    sleep_log: list[float] = []
+
+    def _fake_sleep(sec: float) -> None:
+        sleep_log.append(sec)
+        mono_now[0] += sec
+        wall_now[0] += sec
+
+    try:
+        pacer = PacedReadTransport(
+            min_interval_seconds=2.5,
+            max_queue_wait_seconds=120.0,
+            cooldown_file_path=tmp_path / "state" / "kotak_429_cooldown.json",
+            pacing_state_file_path=tmp_path / "state" / "kotak_pacing_state.json",
+            clock_fn=lambda: mono_now[0],
+            wall_time_fn=lambda: wall_now[0],
+            sleep_fn=_fake_sleep,
+        )
+        adp = LiveKotakNeoAdapter(
+            kotak_api_root=fake_repo,
+            rate_limiter=pacer,
+            cache_dir=tmp_path / "cache_1a",
+            quotes_batch_size=4,
+            max_depth_tokens_per_expiry=8,
+        )
+
+        import kotak_option_chain.auth as fake_auth_mod  # type: ignore[import-not-found]
+        import kotak_option_chain.option_chain as fake_oc_mod  # type: ignore[import-not-found]
+
+        fake_auth_mod.FakeNeoAPI.QUOTES_DB = quotes_by_tok
+        fake_auth_mod.FakeNeoAPI.CANDLES_DB = candles_by_ivl
+        fake_oc_mod.CHAINS_DB = chains_by_exp
+        fake_oc_mod.EXPIRIES_LIST = list(exp_18[:3])
+
+        # Interactive TOTP login (`POST /totp_login` + `POST /totp_validate`) MUST work untouched!
+        login_res = adp._auth.login_with_daily_totp("123456")
+        assert login_res["status"] == "AUTHENTICATED"
+        assert [m for m, _ in fake_auth_mod.WIRE_LOG] == ["POST", "POST"]
+        assert adp.http_request_count == 0
+
+        # Execute live read-only calls across fresh ephemeral clients (`gc.collect()` closes discarded ones)
+        import gc
+
+        adp.fetch_contract_master_raw(dec_dt)
+        gc.collect()
+        adp.fetch_option_chain_raw("2026-11-12", dec_dt)
+        gc.collect()
+        adp.fetch_index_candles_raw(dec_dt)
+        gc.collect()
+
+        get_wire_calls = [u for m, u in fake_auth_mod.WIRE_LOG if m == "GET"]
+        read_only_clients = [c for c in fake_auth_mod.CREATED_CLIENTS if not c.created_for_login]
+
+        # Multiple fresh clients were created across calls (never a single static client!)
+        assert len(read_only_clients) >= 8
+        # ZERO throwaway `cli_peek` clients (`request_count == 0`) were created!
+        assert all(c.request_count >= 1 for c in read_only_clients)
+        # Every fresh read-only client has SharedPacedHttpTransport on `rest_client.session._transport`
+        assert all(
+            isinstance(c.api_client.rest_client.session._transport, SharedPacedHttpTransport)
+            for c in read_only_clients
+        )
+        # Existing separate pacer AND SDK token-bucket limiter received ZERO calls on read-only clients!
+        assert fake_auth_mod.SEPARATE_PACER_CALLS == []
+        # Login client ran untouched before read-only wiring; zero read-only SDK limiter calls occurred
+        assert len(fake_auth_mod.SDK_LIMITER_CALLS) == 2
+
+        # HTTP counter equals exact GET wire count (> 0, NEVER stuck at 0!)
+        # 2 GETs (master: expiries + futures) + 5 GETs (chain: opt + spot + fut + 2 quote batches) + 5 GETs (3x1D + 1H + 15m) = 12 GETs
+        assert len(get_wire_calls) == 12
+        assert adp.http_request_count == 12
+
+        # Strict >= 2.5s spacing across ALL 12 HTTP GETs spanning 10+ fresh clients!
+        assert len(pacer.http_request_timestamps) == 12
+        gaps = [
+            pacer.http_request_timestamps[i] - pacer.http_request_timestamps[i - 1]
+            for i in range(1, len(pacer.http_request_timestamps))
+        ]
+        assert all(g >= 2.5 for g in gaps), f"Expected >= 2.5s across fresh clients, got {gaps}"
+
+        # 1B. Swallowed 429 inside `OptionChainService._fetch_spot_quote` (`except Exception: pass`)
+        #     STILL aborts the run immediately with `KotakRateLimit429Error` and ZERO extra wire calls!
+        fake_auth_mod.WIRE_LOG.clear()
+        fake_auth_mod.FAIL_429_URL_SUBSTR = "/quotes/all/Nifty 50"
+        pacer_swallow = PacedReadTransport(
+            min_interval_seconds=0.0,
+            max_queue_wait_seconds=35.0,
+            cooldown_file_path=tmp_path / "state_swallow" / "kotak_429_cooldown.json",
+            pacing_state_file_path=tmp_path / "state_swallow" / "kotak_pacing_state.json",
+            clock_fn=lambda: mono_now[0],
+            wall_time_fn=lambda: wall_now[0],
+            sleep_fn=_fake_sleep,
+        )
+        adp_swallow = LiveKotakNeoAdapter(
+            kotak_api_root=fake_repo,
+            rate_limiter=pacer_swallow,
+            cache_dir=tmp_path / "cache_swallow",
+            quotes_batch_size=4,
+            max_depth_tokens_per_expiry=8,
+        )
+        with pytest.raises(KotakRateLimit429Error):
+            adp_swallow.fetch_option_chain_raw("2026-11-12", dec_dt)
+        # Stopped right at the 2nd GET (`/quotes/all/Nifty 50`) — did NOT proceed to `get_futures_chain` or batch quotes!
+        assert len(fake_auth_mod.WIRE_LOG) == 2
+        assert adp_swallow.http_request_count == 2
+    finally:
+        if str(fake_repo) in _sys.path:
+            _sys.path.remove(str(fake_repo))
+        for k, prev_mod in saved_modules.items():
+            if prev_mod is None:
+                _sys.modules.pop(k, None)
+            else:
+                _sys.modules[k] = prev_mod
+
+    # 1C. Custom login helper WITHOUT `client_factory` (`require_authenticated_client` directly
+    #     instantiating a fresh `session._transport` client per request) is ALSO wired & counted!
+    wire_custom: list[str] = []
+
+    class _CustomWire:
+        def handle_request(self, req: Any) -> Any:
+            wire_custom.append(f"{req.method} {req.url}")
+            return type("_R", (), {"status_code": 200})()
+
+    class _CustomFreshClient:
+        def __init__(self) -> None:
+            sess = type("_Sess", (), {"_transport": _CustomWire(), "_mounts": {}})()
+            rest = type("_Rest", (), {"session": sess, "rate_limiter": None})()
+            self.api_client = type("_Api", (), {"rest_client": rest})()
+
+        def quotes(self, instrument_tokens: list[dict[str, str]], quote_type: str = "all") -> list[dict[str, Any]]:
+            self.api_client.rest_client.session._transport.handle_request(
+                type("_Req", (), {"method": "GET", "url": f"/custom-quotes/{len(instrument_tokens)}"})()
+            )
+            return [quotes_by_tok[t["instrument_token"]] for t in instrument_tokens if t["instrument_token"] in quotes_by_tok]
+
+    class _CustomAuthNoFactory:
+        def require_authenticated_client(self) -> tuple[_CustomFreshClient, None, None]:
+            return (_CustomFreshClient(), None, None)
+
+    custom_auth = _CustomAuthNoFactory()
+
+    class _CustomSvc:
+        def __init__(self, auth: Any) -> None:
+            self.auth = auth
+
+        def get_full_option_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            c, _, _ = self.auth.require_authenticated_client()
+            c.api_client.rest_client.session._transport.handle_request(
+                type("_Req", (), {"method": "GET", "url": "/custom-chain"})()
+            )
+            return chains_by_exp["2026-11-12"]
+
+    mono_c = [0.0]
+    wall_c = [1_794_455_900.0]
+    pacer_c = PacedReadTransport(
+        min_interval_seconds=2.5,
+        max_queue_wait_seconds=35.0,
+        cooldown_file_path=tmp_path / "custom_state" / "cooldown.json",
+        pacing_state_file_path=tmp_path / "custom_state" / "pacing.json",
+        clock_fn=lambda: mono_c[0],
+        wall_time_fn=lambda: wall_c[0],
+        sleep_fn=lambda s: (
+            mono_c.__setitem__(0, mono_c[0] + s),
+            wall_c.__setitem__(0, wall_c[0] + s),
+        ),
+    )
+    adp_c = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+    adp_c._auth = custom_auth
+    adp_c._service = _CustomSvc(custom_auth)
+    adp_c.rate_limiter = pacer_c
+    adp_c.enforce_schedule = True
+    adp_c.depth_strikes_each_side = 40
+    adp_c.quotes_batch_size = 4
+    adp_c.max_depth_tokens_per_expiry = 8
+    adp_c.extra_neo_symbols = ()
+    adp_c.trading_calendar = {}
+    adp_c._cache = {}
+
+    adp_c.fetch_option_chain_raw("2026-11-12", dec_dt)
+    assert len(wire_custom) == 3  # 1 chain GET + 2 quote batch GETs across 3 fresh clients
+    assert adp_c.http_request_count == 3
+    gaps_c = [
+        pacer_c.http_request_timestamps[i] - pacer_c.http_request_timestamps[i - 1]
+        for i in range(1, len(pacer_c.http_request_timestamps))
+    ]
+    assert all(g >= 2.5 for g in gaps_c)
+
+    # 1D. Simulated `httpx` installed (`request_safety._httpx is not None`) + foreign subclass of
+    #     `httpx.HTTPTransport`: default `transport=None` simulated clients are NOT clobbered by a
+    #     real network `HTTPTransport`, AND subclassed `HTTPTransport` foreign pacers are bypassed!
+    import nifty_analyst.adapters.request_safety as req_safety_mod
+
+    sub_wire_calls: list[str] = []
+    sub_foreign_calls: list[str] = []
+
+    class _SimBaseHttpxTransport:
+        def handle_request(self, request: Any) -> Any:
+            sub_wire_calls.append(f"{request.method} {request.url}")
+            return type("_R", (), {"status_code": 200})()
+
+    class _SimForeignSubTransport(_SimBaseHttpxTransport):
+        def handle_request(self, request: Any) -> Any:
+            sub_foreign_calls.append(f"{request.method} {request.url}")
+            return super().handle_request(request)
+
+    class _SimHttpxModule:
+        BaseTransport = object
+        HTTPTransport = _SimBaseHttpxTransport
+
+        class Limits:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+    prev_httpx = req_safety_mod._httpx
+    req_safety_mod._httpx = _SimHttpxModule  # type: ignore[assignment]
+    try:
+        pacer_h = PacedReadTransport(
+            min_interval_seconds=0.0,
+            max_queue_wait_seconds=35.0,
+            cooldown_file_path=tmp_path / "sim_httpx" / "cooldown.json",
+            pacing_state_file_path=tmp_path / "sim_httpx" / "pacing.json",
+        )
+
+        class _SimClientWithSubTransport:
+            def __init__(self, transport: Any = None) -> None:
+                tr = transport if transport is not None else _SimForeignSubTransport()
+                sess = type("_Sess", (), {"_transport": tr, "_mounts": {}})()
+                rest = type("_Rest", (), {"session": sess, "rate_limiter": None})()
+                self.api_client = type("_Api", (), {"rest_client": rest})()
+
+        sim_auth = type(
+            "_SimAuth",
+            (),
+            {
+                "client_factory": _SimClientWithSubTransport,
+                "require_authenticated_client": lambda self: (self.client_factory(), None, None),
+            },
+        )()
+
+        class _SimSvc:
+            def __init__(self, a: Any) -> None:
+                self.auth = a
+
+            def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                c, _, _ = self.auth.require_authenticated_client()
+                c.api_client.rest_client.session._transport.handle_request(
+                    type("_Req", (), {"method": "GET", "url": "/sim-expiries"})()
+                )
+                return {"status": "OK", "expiries": ["2026-11-12"]}
+
+            def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                c, _, _ = self.auth.require_authenticated_client()
+                c.api_client.rest_client.session._transport.handle_request(
+                    type("_Req", (), {"method": "GET", "url": "/sim-futures"})()
+                )
+                return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+        adp_h = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+        adp_h._auth = sim_auth
+        adp_h._service = _SimSvc(sim_auth)
+        adp_h.rate_limiter = pacer_h
+        adp_h.enforce_schedule = True
+        adp_h.trading_calendar = {}
+        adp_h._cache = {}
+        adp_h.fetch_contract_master_raw(dec_dt)
+
+        assert adp_h.http_request_count == 2
+        assert len(sub_wire_calls) == 2
+        # Foreign subclass override was bypassed via `_SuperHttpTransportAdapter`!
+        assert sub_foreign_calls == []
+    finally:
+        req_safety_mod._httpx = prev_httpx
+
+
+def test_kotak_shared_safety_state_fails_closed_on_corrupt_files_and_failed_writes(
+    tmp_path: Path,
+) -> None:
+    """Regression 2: Corrupt shared safety state files OR failed state writes (unwritable path,
+    read-only directory, or atomic `os.replace` ENOSPC failure) MUST fail closed BEFORE dispatching
+    any HTTP request, never silently losing spacing or 429 cooldown protection.
+    """
+    from nifty_analyst.adapters.kotak_neo import (
+        KotakCooldownPersistence429Error,
+        KotakRateLimit429Error,
+        KotakSharedStateError,
+        LiveKotakNeoAdapter,
+    )
+    from nifty_analyst.adapters.request_safety import (
+        CooldownPersistence429Error,
+        SharedSafetyStateError,
+    )
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    wall_now = 1_794_455_565.0
+    wire_attempts: list[str] = []
+    return_429 = [False]
+
+    class _Wire:
+        def handle_request(self, req: Any) -> Any:
+            wire_attempts.append(f"{req.method} {req.url}")
+            return type("_Resp", (), {"status_code": 429 if return_429[0] else 200})()
+
+    class _FreshCli:
+        def __init__(self) -> None:
+            sess = type("_Sess", (), {"_transport": _Wire(), "_mounts": {}})()
+            rest = type("_Rest", (), {"session": sess, "rate_limiter": None})()
+            self.api_client = type("_Api", (), {"rest_client": rest})()
+
+    def _build_adapter(cooldown_p: Path, pacing_p: Path) -> LiveKotakNeoAdapter:
+        pacer = PacedReadTransport(
+            min_interval_seconds=2.5,
+            max_queue_wait_seconds=35.0,
+            cooldown_file_path=cooldown_p,
+            pacing_state_file_path=pacing_p,
+            wall_time_fn=lambda: wall_now,
+            sleep_fn=lambda _s: None,
+        )
+        auth = type(
+            "_Auth",
+            (),
+            {
+                "client_factory": _FreshCli,
+                "require_authenticated_client": lambda self: (self.client_factory(), None, None),
+            },
+        )()
+
+        class _Svc:
+            def __init__(self, a: Any) -> None:
+                self.auth = a
+
+            def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                c, _, _ = self.auth.require_authenticated_client()
+                c.api_client.rest_client.session._transport.handle_request(
+                    type("_Req", (), {"method": "GET", "url": "/expiries"})()
+                )
+                return {"status": "OK", "expiries": ["2026-11-12"]}
+
+            def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                c, _, _ = self.auth.require_authenticated_client()
+                c.api_client.rest_client.session._transport.handle_request(
+                    type("_Req", (), {"method": "GET", "url": "/futures"})()
+                )
+                return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+        adp = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+        adp._auth = auth
+        adp._service = _Svc(auth)
+        adp.rate_limiter = pacer
+        adp.enforce_schedule = True
+        adp.trading_calendar = {}
+        adp._quote_retry_sleep_fn = lambda s: (_ for _ in ()).throw(
+            AssertionError(f"Shared-state error MUST NOT retry or sleep ({s}s)!")
+        )
+        adp._cache = {}
+        return adp
+
+    # 2A. Corrupt `kotak_pacing_state.json` -> fails closed with ZERO wire requests
+    corrupt_pacing_payloads = [
+        "",
+        "   \n",
+        "{corrupt-json",
+        "[1, 2, 3]",
+        "{}",
+        json.dumps({"last_request_wall_epoch": True}),
+        json.dumps({"last_request_wall_epoch": None}),
+        json.dumps({"last_request_wall_epoch": "not-a-number"}),
+        json.dumps({"last_request_wall_epoch": 0}),
+        json.dumps({"last_request_wall_epoch": -10.0}),
+        json.dumps({"last_request_wall_epoch": wall_now + 60.0}),  # > 5s in the future
+    ]
+    for idx, bad_text in enumerate(corrupt_pacing_payloads):
+        sub = tmp_path / f"corrupt_pacing_{idx}"
+        sub.mkdir(parents=True, exist_ok=True)
+        pacing_p = sub / "kotak_pacing_state.json"
+        cooldown_p = sub / "kotak_429_cooldown.json"
+        pacing_p.write_text(bad_text, encoding="utf-8")
+        wire_attempts.clear()
+        adp_bad = _build_adapter(cooldown_p, pacing_p)
+        with pytest.raises(KotakSharedStateError) as exc_info:
+            adp_bad.fetch_contract_master_raw(dec_dt)
+        assert isinstance(exc_info.value, SharedSafetyStateError)
+        assert wire_attempts == [], f"Leak on corrupt pacing case {idx}: {bad_text!r}"
+        assert adp_bad.http_request_count == 0
+
+    # 2B. Corrupt `kotak_429_cooldown.json` -> fails closed with ZERO wire requests
+    corrupt_cooldown_payloads = [
+        "",
+        "{corrupt-cooldown",
+        "[]",
+        "{}",
+        json.dumps({"cooldown_until_epoch": False}),
+        json.dumps({"cooldown_until_epoch": None}),
+        json.dumps({"cooldown_until_epoch": 0}),
+        json.dumps({"cooldown_until_epoch": -1}),
+        json.dumps({"recorded_at_epoch": wall_now + 100.0, "cooldown_until_epoch": wall_now + 10.0}),
+    ]
+    for idx, bad_text in enumerate(corrupt_cooldown_payloads):
+        sub = tmp_path / f"corrupt_cd_{idx}"
+        sub.mkdir(parents=True, exist_ok=True)
+        pacing_p = sub / "kotak_pacing_state.json"
+        cooldown_p = sub / "kotak_429_cooldown.json"
+        cooldown_p.write_text(bad_text, encoding="utf-8")
+        wire_attempts.clear()
+        adp_bad = _build_adapter(cooldown_p, pacing_p)
+        with pytest.raises(KotakSharedStateError) as exc_info:
+            adp_bad.fetch_contract_master_raw(dec_dt)
+        assert isinstance(exc_info.value, SharedSafetyStateError)
+        assert wire_attempts == [], f"Leak on corrupt cooldown case {idx}: {bad_text!r}"
+        assert adp_bad.http_request_count == 0
+
+    # 2C. Failed writes on `kotak_pacing_state.json` -> fails closed BEFORE any HTTP request is sent!
+    # Case 2C-i: target path is a directory
+    dir_block_sub = tmp_path / "dir_blocks_pacing"
+    (dir_block_sub / "kotak_pacing_state.json").mkdir(parents=True, exist_ok=True)
+    wire_attempts.clear()
+    adp_dir_block = _build_adapter(
+        dir_block_sub / "kotak_429_cooldown.json",
+        dir_block_sub / "kotak_pacing_state.json",
+    )
+    with pytest.raises(KotakSharedStateError):
+        adp_dir_block.fetch_contract_master_raw(dec_dt)
+    assert wire_attempts == []
+
+    # Case 2C-ii: read-only state directory (`chmod 0o555`)
+    ro_dir = tmp_path / "readonly_state_dir"
+    ro_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(ro_dir, 0o555)
+    try:
+        wire_attempts.clear()
+        adp_ro = _build_adapter(
+            ro_dir / "kotak_429_cooldown.json",
+            ro_dir / "kotak_pacing_state.json",
+        )
+        with pytest.raises(KotakSharedStateError):
+            adp_ro.fetch_contract_master_raw(dec_dt)
+        assert wire_attempts == []
+    finally:
+        os.chmod(ro_dir, 0o755)
+
+    # Case 2C-iii: atomic `os.replace` failure (`ENOSPC`) during pacing state persistence + pipeline check
+    enospc_sub = tmp_path / "enospc_pacing"
+    enospc_sub.mkdir(parents=True, exist_ok=True)
+    adp_enospc = _build_adapter(
+        enospc_sub / "kotak_429_cooldown.json",
+        enospc_sub / "kotak_pacing_state.json",
+    )
+    orig_replace = os.replace
+
+    def _failing_replace(src: str, dst: str) -> None:
+        if "kotak_pacing_state.json" in str(dst):
+            raise OSError("Simulated ENOSPC while persisting kotak_pacing_state.json")
+        orig_replace(src, dst)
+
+    os.replace = _failing_replace  # type: ignore[assignment]
+    try:
+        wire_attempts.clear()
+        with pytest.raises(KotakSharedStateError, match="Simulated ENOSPC"):
+            adp_enospc.fetch_contract_master_raw(dec_dt)
+        # Failed BEFORE sending the HTTP request!
+        assert wire_attempts == []
+        assert adp_enospc.http_request_count == 0
+        # Temp file cleaned up cleanly
+        assert list(enospc_sub.glob("*.tmp")) == []
+
+        pos_empty = tmp_path / "empty_pos_state.json"
+        pos_empty.write_text("[]", encoding="utf-8")
+        st_pipe, deliv_pipe = run_analyst_pipeline(
+            dec_dt,
+            AnalystConfig(
+                mode="LIVE_MORNING_SNAPSHOT",
+                fixtures_dir=str(FIXTURES_DIR),
+                open_positions_file=str(pos_empty),
+                cache_dir=str(enospc_sub),
+                audit_log_path=str(tmp_path / "enospc_audit.jsonl"),
+            ),
+            broker_adapter=adp_enospc,
+        )
+        assert st_pipe.final_output is not None
+        assert st_pipe.final_output.verdict == "INSUFFICIENT DATA"
+        assert deliv_pipe.alerted_trader is False
+        assert wire_attempts == []
+    finally:
+        os.replace = orig_replace  # type: ignore[assignment]
+
+    # 2D. Failed write on `kotak_429_cooldown.json` when HTTP 429 occurs -> raises
+    #     `KotakCooldownPersistence429Error` AND keeps in-memory cooldown armed for same-process calls!
+    cd_fail_sub = tmp_path / "cd_write_fail"
+    (cd_fail_sub / "kotak_429_cooldown.json").mkdir(parents=True, exist_ok=True)
+    return_429[0] = True
+    wire_attempts.clear()
+    adp_cd_fail = _build_adapter(
+        cd_fail_sub / "kotak_429_cooldown.json",
+        cd_fail_sub / "kotak_pacing_state.json",
+    )
+    # Initial check sees `kotak_429_cooldown.json` is a directory -> fails closed even before 1st call!
+    with pytest.raises(KotakSharedStateError):
+        adp_cd_fail.fetch_contract_master_raw(dec_dt)
+    assert wire_attempts == []
+
+    # Now start with clean directory, then simulate `os.replace` failure specifically when 429 records cooldown!
+    cd_enospc_sub = tmp_path / "cd_enospc_on_429"
+    cd_enospc_sub.mkdir(parents=True, exist_ok=True)
+
+    def _fail_cooldown_replace(src: str, dst: str) -> None:
+        if "kotak_429_cooldown.json" in str(dst):
+            raise OSError("Simulated ENOSPC while persisting kotak_429_cooldown.json")
+        orig_replace(src, dst)
+
+    os.replace = _fail_cooldown_replace  # type: ignore[assignment]
+    try:
+        wire_attempts.clear()
+        adp_cd_429 = _build_adapter(
+            cd_enospc_sub / "kotak_429_cooldown.json",
+            cd_enospc_sub / "kotak_pacing_state.json",
+        )
+        with pytest.raises(KotakCooldownPersistence429Error) as cd_exc_info:
+            adp_cd_429.fetch_contract_master_raw(dec_dt)
+        assert isinstance(cd_exc_info.value, KotakRateLimit429Error)
+        assert isinstance(cd_exc_info.value, KotakSharedStateError)
+        assert isinstance(cd_exc_info.value.__cause__, CooldownPersistence429Error)
+        assert len(wire_attempts) == 1
+
+        # Even though disk write failed, `_in_memory_cooldown_until` stays armed and blocks follow-up calls!
+        return_429[0] = False
+        with pytest.raises(KotakRateLimit429Error, match="In-memory HTTP 429 cooldown active"):
+            adp_cd_429.fetch_contract_master_raw(dec_dt)
+        assert len(wire_attempts) == 1
+    finally:
+        os.replace = orig_replace  # type: ignore[assignment]
+
+
+def test_kotak_concurrent_processes_shared_spacing_fresh_clients_and_429_propagation(
+    tmp_path: Path,
+) -> None:
+    """Regression 3: Spawn 4 real concurrent OS processes (`subprocess.Popen`) sharing
+    `kotak_pacing_state.json` and `kotak_429_cooldown.json` with fresh clients per request:
+      - 3A: All 8 HTTP GETs (4 procs x 2 calls) are counted (`http_request_count == 2` per proc)
+            and globally serialized with monotonic spacing >= min_interval across processes.
+      - 3B: When the 1st HTTP GET returns 429 while peer processes are waiting in `wait_for_slot()`,
+            peer processes re-check cooldown upon waking and abort with `0` extra wire calls!
+    """
+    import subprocess
+    import sys as _sys
+    import time as _time
+
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+    worker_script = tmp_path / "concurrent_kotak_worker.py"
+    worker_script.write_text(
+        '''from __future__ import annotations
+import datetime as dt
+import fcntl
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from nifty_analyst.adapters.kotak_neo import KotakRateLimit429Error, LiveKotakNeoAdapter
+from nifty_analyst.adapters.request_safety import PacedReadTransport
+from nifty_analyst.scrubber import IST
+
+
+def _append_jsonl(log_path: Path, obj: dict) -> None:
+    lock_p = log_path.parent / f".{log_path.name}.lock"
+    fd = os.open(str(lock_p), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj) + "\\n")
+            fh.flush()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def main() -> int:
+    state_dir = Path(sys.argv[1])
+    wire_log = Path(sys.argv[2])
+    ready_dir = Path(sys.argv[3])
+    go_file = Path(sys.argv[4])
+    result_file = Path(sys.argv[5])
+    mode = sys.argv[6]  # "spacing" or "429_first"
+    min_ivl = float(sys.argv[7])
+    worker_id = sys.argv[8]
+
+    class _Wire:
+        def handle_request(self, req):
+            mono_ts = time.monotonic()
+            wall_ts = time.time()
+            # Atomically record wire dispatch & determine call index under flock
+            lock_p = wire_log.parent / ".wire_seq.lock"
+            fd = os.open(str(lock_p), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                existing = (
+                    wire_log.read_text(encoding="utf-8").strip().splitlines()
+                    if wire_log.exists()
+                    else []
+                )
+                seq_num = len(existing) + 1
+                row = {
+                    "seq": seq_num,
+                    "worker": worker_id,
+                    "pid": os.getpid(),
+                    "mono": mono_ts,
+                    "wall": wall_ts,
+                    "url": req.url,
+                }
+                with wire_log.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row) + "\\n")
+                    fh.flush()
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+            if mode == "429_first" and seq_num == 1:
+                return type("_R", (), {"status_code": 429})()
+            return type("_R", (), {"status_code": 200})()
+
+    class _FreshClient:
+        def __init__(self) -> None:
+            sess = type("_Sess", (), {"_transport": _Wire(), "_mounts": {}})()
+            rest = type("_Rest", (), {"session": sess, "rate_limiter": None})()
+            self.api_client = type("_Api", (), {"rest_client": rest})()
+
+    class _Auth:
+        client_factory = _FreshClient
+
+        def require_authenticated_client(self):
+            return (self.client_factory(), None, None)
+
+    auth = _Auth()
+
+    class _Svc:
+        def __init__(self, a) -> None:
+            self.auth = a
+
+        def get_expiries(self, *args, **kwargs):
+            c, _, _ = self.auth.require_authenticated_client()
+            c.api_client.rest_client.session._transport.handle_request(
+                type("_Req", (), {"method": "GET", "url": f"/expiries/{worker_id}"})()
+            )
+            return {"status": "OK", "expiries": ["2026-11-12"]}
+
+        def get_futures_chain(self, *args, **kwargs):
+            c, _, _ = self.auth.require_authenticated_client()
+            c.api_client.rest_client.session._transport.handle_request(
+                type("_Req", (), {"method": "GET", "url": f"/futures/{worker_id}"})()
+            )
+            return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+    pacer = PacedReadTransport(
+        min_interval_seconds=min_ivl,
+        max_queue_wait_seconds=35.0,
+        cooldown_file_path=state_dir / "kotak_429_cooldown.json",
+        pacing_state_file_path=state_dir / "kotak_pacing_state.json",
+    )
+    adp = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+    adp._auth = auth
+    adp._service = _Svc(auth)
+    adp.rate_limiter = pacer
+    adp.enforce_schedule = True
+    adp.trading_calendar = {}
+    adp._cache = {}
+
+    # Signal ready and wait at barrier so all 4 OS processes race simultaneously
+    (ready_dir / f"ready_{worker_id}").write_text("1", encoding="utf-8")
+    deadline = time.monotonic() + 10.0
+    while not go_file.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("Timed out waiting for concurrent start barrier")
+        time.sleep(0.005)
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    try:
+        adp.fetch_contract_master_raw(dec_dt)
+        result_file.write_text(
+            json.dumps(
+                {
+                    "status": "OK",
+                    "worker": worker_id,
+                    "http_request_count": adp.http_request_count,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+    except KotakRateLimit429Error as exc:
+        result_file.write_text(
+            json.dumps(
+                {
+                    "status": "HALTED_429",
+                    "worker": worker_id,
+                    "http_request_count": adp.http_request_count,
+                    "error": str(exc),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+''',
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{repo_src}:{existing_pp}" if existing_pp else repo_src
+
+    def _run_4_workers(sub_name: str, mode: str, min_ivl: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Path]:
+        base = tmp_path / sub_name
+        state_dir = base / "shared_state"
+        ready_dir = base / "ready"
+        res_dir = base / "results"
+        for d in (state_dir, ready_dir, res_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        wire_log = base / "wire.jsonl"
+        go_file = base / "go.signal"
+
+        procs: list[subprocess.Popen[str]] = []
+        for idx in range(4):
+            wid = f"w{idx}"
+            p = subprocess.Popen(
+                [
+                    _sys.executable,
+                    str(worker_script),
+                    str(state_dir),
+                    str(wire_log),
+                    str(ready_dir),
+                    str(go_file),
+                    str(res_dir / f"{wid}.json"),
+                    mode,
+                    str(min_ivl),
+                    wid,
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            procs.append(p)
+
+        try:
+            wait_deadline = _time.monotonic() + 10.0
+            while len(list(ready_dir.glob("ready_*"))) < 4:
+                for p in procs:
+                    if p.poll() is not None:
+                        out, err = p.communicate(timeout=5)
+                        raise AssertionError(f"Worker exited early ({p.returncode}): {out}\n{err}")
+                if _time.monotonic() > wait_deadline:
+                    raise TimeoutError("Workers did not reach ready barrier in time")
+                _time.sleep(0.01)
+
+            # Release all 4 processes simultaneously!
+            go_file.write_text("GO", encoding="utf-8")
+
+            for p in procs:
+                out, err = p.communicate(timeout=20)
+                assert p.returncode == 0, f"Worker failed ({p.returncode}):\nSTDOUT: {out}\nSTDERR: {err}"
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+
+        results = [
+            json.loads((res_dir / f"w{idx}.json").read_text(encoding="utf-8"))
+            for idx in range(4)
+        ]
+        wire_rows = (
+            [json.loads(line) for line in wire_log.read_text(encoding="utf-8").strip().splitlines()]
+            if wire_log.exists()
+            else []
+        )
+        return results, wire_rows, state_dir
+
+    # 3A. Concurrent spacing across 4 real OS processes x 2 fresh-client HTTP GETs = 8 total GETs
+    min_ivl_spacing = 0.25
+    res_3a, wire_3a, state_3a = _run_4_workers("proc_spacing", "spacing", min_ivl_spacing)
+    assert all(r["status"] == "OK" for r in res_3a)
+    assert [r["http_request_count"] for r in res_3a] == [2, 2, 2, 2]
+    assert len(wire_3a) == 8
+
+    # Shared pacing state file remains valid JSON with zero leftover `.tmp` files
+    persisted_pacing = json.loads((state_3a / "kotak_pacing_state.json").read_text(encoding="utf-8"))
+    assert persisted_pacing["last_request_wall_epoch"] > 0
+    assert list(state_3a.glob("*.tmp")) == []
+
+    # Monotonic wire timestamps across all 4 concurrent OS processes strictly satisfy >= min_interval!
+    mono_sorted = sorted(float(r["mono"]) for r in wire_3a)
+    cross_proc_gaps = [mono_sorted[i] - mono_sorted[i - 1] for i in range(1, len(mono_sorted))]
+    assert all(
+        g >= min_ivl_spacing for g in cross_proc_gaps
+    ), f"Concurrent processes violated strict shared spacing ({min_ivl_spacing}s): gaps={cross_proc_gaps}"
+
+    # 3B. Concurrent 429 propagation: 1st wire GET returns 429 while 3 peer processes wait in `wait_for_slot`
+    res_3b, wire_3b, state_3b = _run_4_workers("proc_429", "429_first", 0.30)
+    assert all(r["status"] == "HALTED_429" for r in res_3b)
+    # ONLY the 1st process touched the wire; all 3 peer processes woke up, saw persisted cooldown, and aborted!
+    assert len(wire_3b) == 1
+    assert sum(int(r["http_request_count"]) for r in res_3b) == 1
+    persisted_cd = json.loads((state_3b / "kotak_429_cooldown.json").read_text(encoding="utf-8"))
+    assert persisted_cd["cooldown_until_epoch"] > persisted_cd["recorded_at_epoch"]
+    assert list(state_3b.glob("*.tmp")) == []

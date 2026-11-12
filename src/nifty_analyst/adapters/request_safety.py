@@ -17,7 +17,9 @@ import datetime as dt
 import fcntl
 import json
 import math
+import os
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -689,14 +691,114 @@ class HttpRateLimit429Error(RuntimeError):
     """Raised immediately at the HTTP transport boundary upon HTTP 429 with zero retry."""
 
 
+class SharedSafetyStateError(RuntimeError):
+    """Raised (fail-closed) when shared pacing/cooldown state is corrupt, unreadable, or unwritable."""
+
+
+class CooldownPersistence429Error(HttpRateLimit429Error, SharedSafetyStateError):
+    """Raised when HTTP 429 occurs AND persisting the shared 429 cooldown file fails."""
+
+
+def _parse_strict_positive_epoch(raw_val: Any, field_name: str, state_path: Path, label: str) -> float:
+    if raw_val is None or isinstance(raw_val, bool):
+        raise SharedSafetyStateError(
+            f"Corrupt {label} at {state_path}: {field_name!r} is missing or invalid ({raw_val!r})."
+        )
+    try:
+        parsed = float(raw_val)
+    except (TypeError, ValueError) as exc:
+        raise SharedSafetyStateError(
+            f"Corrupt {label} at {state_path}: {field_name!r} is not numeric ({raw_val!r})."
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise SharedSafetyStateError(
+            f"Corrupt {label} at {state_path}: {field_name!r} must be finite > 0, got {raw_val!r}."
+        )
+    return parsed
+
+
+def _read_validated_json_dict(target_path: Path, label: str) -> dict[str, Any] | None:
+    try:
+        if not target_path.exists():
+            return None
+        if not target_path.is_file():
+            raise SharedSafetyStateError(
+                f"Shared safety state path for {label} is not a regular file: {target_path}"
+            )
+        raw_text = target_path.read_text(encoding="utf-8")
+    except SharedSafetyStateError:
+        raise
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SharedSafetyStateError(
+            f"Unreadable {label} at {target_path}: {exc}"
+        ) from exc
+
+    if not raw_text.strip():
+        raise SharedSafetyStateError(f"Empty/corrupt {label} at {target_path}.")
+    try:
+        parsed = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SharedSafetyStateError(
+            f"Malformed JSON in {label} at {target_path}: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise SharedSafetyStateError(
+            f"Invalid JSON root in {label} at {target_path}: expected object, got {type(parsed).__name__}."
+        )
+    return parsed
+
+
+def _atomic_write_json(target_path: Path, payload: dict[str, Any], label: str) -> None:
+    tmp_path: Path | None = None
+    fd: int | None = None
+    try:
+        if target_path.exists() and not target_path.is_file():
+            raise SharedSafetyStateError(
+                f"Cannot write {label} because target is not a regular file: {target_path}"
+            )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = json.dumps(payload, indent=2, allow_nan=False).encode("utf-8")
+        tmp_path = target_path.parent / f".{target_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        view = memoryview(encoded)
+        written = 0
+        while written < len(view):
+            n = os.write(fd, view[written:])
+            if n <= 0:
+                raise OSError("short write to shared safety state file")
+            written += n
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(str(tmp_path), str(target_path))
+        tmp_path = None
+    except SharedSafetyStateError:
+        raise
+    except Exception as exc:
+        raise SharedSafetyStateError(
+            f"Failed to persist {label} to {target_path}: {exc}"
+        ) from exc
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 class PacedReadTransport:
     """Serial read-only request pacer enforcing 2.5s spacing, 35s queue cap, and 429 cooldown.
 
     LIMITATION (`HTTP_BOUNDARY_PACING_UNVERIFIED`):
     Standalone wrapper-level `PacedReadTransport` spaces top-level adapter calls unless wired
-    at the underlying `NeoAPI` HTTP client boundary via `SharedPacedHttpTransport` (which
-    counts and paces every actual HTTP `GET` request across compound `Kotak_API` wrapper calls
-    and coordinates cross-process spacing via `pacing_state_file_path`).
+    at the underlying `NeoAPI` HTTP client creation boundary via `SharedPacedHttpTransport`
+    (which counts and paces every actual HTTP `GET` request across fresh clients and compound
+    `Kotak_API` wrapper calls, and fails closed on any shared-state error).
     """
 
     HTTP_BOUNDARY_PACING_UNVERIFIED: bool = True
@@ -727,23 +829,68 @@ class PacedReadTransport:
         self._wall_time_fn = wall_time_fn
         self._sleep_fn = sleep_fn
         self._last_request_ts: float | None = None
+        self._in_memory_cooldown_until: float | None = None
+        self._call_aborted_error: Exception | None = None
+        self._pending_pre_guard_slot: bool = False
         self.request_count: int = 0
         self.http_request_count: int = 0
         self.cumulative_wait_seconds: float = 0.0
         self.actual_slept_seconds: float = 0.0
         self.request_timestamps: list[float] = []
+        self.http_request_timestamps: list[float] = []
         self.http_boundary_attached: bool = False
 
+    def _now_wall_checked(self) -> float:
+        try:
+            now_epoch = float(self._wall_time_fn())
+        except Exception as exc:
+            err = SharedSafetyStateError(f"Wall-clock function failed: {exc}")
+            self._call_aborted_error = err
+            raise err from exc
+        if not math.isfinite(now_epoch) or now_epoch <= 0.0:
+            err = SharedSafetyStateError(
+                f"Wall-clock function returned invalid epoch: {now_epoch!r}"
+            )
+            self._call_aborted_error = err
+            raise err
+        return now_epoch
+
     def check_persisted_429_cooldown(self) -> None:
-        """Raise PacedCooldownActiveError if a persisted 429 cooldown has not yet expired."""
-        if self.cooldown_file_path is None or not self.cooldown_file_path.exists():
+        """Fail closed if an in-memory or persisted 429 cooldown is active or corrupt."""
+        now_epoch = self._now_wall_checked()
+        if self._in_memory_cooldown_until is not None and now_epoch < self._in_memory_cooldown_until:
+            rem_mem = round(self._in_memory_cooldown_until - now_epoch, 1)
+            raise PacedCooldownActiveError(
+                f"In-memory HTTP 429 cooldown active for another {rem_mem}s; refusing broker call."
+            )
+        if self.cooldown_file_path is None:
             return
         try:
-            payload = json.loads(self.cooldown_file_path.read_text(encoding="utf-8"))
-            until_epoch = float(payload.get("cooldown_until_epoch", 0.0))
-        except Exception:
-            return
-        now_epoch = self._wall_time_fn()
+            payload = _read_validated_json_dict(self.cooldown_file_path, "HTTP 429 cooldown state")
+            if payload is None:
+                return
+            until_epoch = _parse_strict_positive_epoch(
+                payload.get("cooldown_until_epoch"),
+                "cooldown_until_epoch",
+                self.cooldown_file_path,
+                "HTTP 429 cooldown state",
+            )
+            if "recorded_at_epoch" in payload:
+                rec_epoch = _parse_strict_positive_epoch(
+                    payload.get("recorded_at_epoch"),
+                    "recorded_at_epoch",
+                    self.cooldown_file_path,
+                    "HTTP 429 cooldown state",
+                )
+                if until_epoch < rec_epoch:
+                    raise SharedSafetyStateError(
+                        f"Corrupt HTTP 429 cooldown state at {self.cooldown_file_path}: "
+                        f"cooldown_until_epoch ({until_epoch}) < recorded_at_epoch ({rec_epoch})."
+                    )
+        except SharedSafetyStateError as exc:
+            self._call_aborted_error = exc
+            raise
+
         if now_epoch < until_epoch:
             rem = round(until_epoch - now_epoch, 1)
             raise PacedCooldownActiveError(
@@ -752,24 +899,62 @@ class PacedReadTransport:
             )
 
     def record_429_cooldown(self, reason: str) -> None:
-        """Persist HTTP 429 cooldown timestamp to disk so subsequent runs do not probe the API."""
+        """Persist HTTP 429 cooldown timestamp atomically; fail closed if persistence fails."""
+        now_epoch = self._now_wall_checked()
+        if not math.isfinite(self.cooldown_seconds_on_429) or self.cooldown_seconds_on_429 <= 0.0:
+            self._in_memory_cooldown_until = float("inf")
+            err = SharedSafetyStateError(
+                f"Invalid cooldown_seconds_on_429: {self.cooldown_seconds_on_429!r}"
+            )
+            self._call_aborted_error = err
+            raise err
+
+        until_epoch = now_epoch + self.cooldown_seconds_on_429
+        # Arm in-memory cooldown FIRST so even if disk persistence fails, same-process calls stay blocked
+        if self._in_memory_cooldown_until is None or until_epoch > self._in_memory_cooldown_until:
+            self._in_memory_cooldown_until = until_epoch
+
         if self.cooldown_file_path is None:
             return
-        try:
-            self.cooldown_file_path.parent.mkdir(parents=True, exist_ok=True)
-            now_epoch = self._wall_time_fn()
-            payload = {
-                "recorded_at_epoch": now_epoch,
-                "cooldown_until_epoch": now_epoch + self.cooldown_seconds_on_429,
-                "reason": str(reason)[:240],
-            }
-            tmp = self.cooldown_file_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            tmp.replace(self.cooldown_file_path)
-        except Exception:
-            pass
 
-    def _wait_in_process(self) -> float:
+        payload = {
+            "recorded_at_epoch": now_epoch,
+            "cooldown_until_epoch": until_epoch,
+            "reason": str(reason)[:240],
+            "pid": os.getpid(),
+        }
+        lock_fd: int | None = None
+        try:
+            if self.cooldown_file_path.exists() and not self.cooldown_file_path.is_file():
+                raise SharedSafetyStateError(
+                    f"Cooldown state path is not a regular file: {self.cooldown_file_path}"
+                )
+            self.cooldown_file_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.cooldown_file_path.parent / f".{self.cooldown_file_path.name}.lock"
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _atomic_write_json(self.cooldown_file_path, payload, "HTTP 429 cooldown state")
+        except SharedSafetyStateError as exc:
+            self._call_aborted_error = exc
+            raise
+        except Exception as exc:
+            err = SharedSafetyStateError(
+                f"Failed to lock/persist HTTP 429 cooldown state at {self.cooldown_file_path}: {exc}"
+            )
+            self._call_aborted_error = err
+            raise err from exc
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+
+    def _wait_in_process(self, lock_wait_seconds: float = 0.0) -> float:
         now = self._clock_fn()
         effective_interval = (
             self.min_interval_seconds + self.strict_guard_seconds
@@ -777,40 +962,69 @@ class PacedReadTransport:
             else 0.0
         )
         target_ts: float | None = None
+        target_wall_ts: float | None = None
         wait_needed = 0.0
         if self._last_request_ts is not None and effective_interval > 0.0:
             target_ts = self._last_request_ts + effective_interval
             if now < target_ts:
                 wait_needed = target_ts - now
 
-        # Also incorporate cross-process wall-clock spacing when pacing_state_file_path is active
-        if self.pacing_state_file_path is not None and effective_interval > 0.0:
+        # Incorporate fail-closed cross-process wall-clock spacing when pacing_state_file_path is active
+        if self.pacing_state_file_path is not None:
             try:
-                if self.pacing_state_file_path.exists():
-                    st = json.loads(self.pacing_state_file_path.read_text(encoding="utf-8"))
-                    last_wall = float(st.get("last_request_wall_epoch", 0.0))
-                    wall_elapsed = self._wall_time_fn() - last_wall
-                    if 0.0 <= wall_elapsed < effective_interval:
-                        cross_wait = effective_interval - wall_elapsed
+                st = _read_validated_json_dict(
+                    self.pacing_state_file_path, "shared pacing state"
+                )
+                if st is not None:
+                    last_wall = _parse_strict_positive_epoch(
+                        st.get("last_request_wall_epoch"),
+                        "last_request_wall_epoch",
+                        self.pacing_state_file_path,
+                        "shared pacing state",
+                    )
+                    now_wall = self._now_wall_checked()
+                    wall_elapsed = now_wall - last_wall
+                    if wall_elapsed < -5.0:
+                        raise SharedSafetyStateError(
+                            f"Corrupt future last_request_wall_epoch in {self.pacing_state_file_path}: "
+                            f"last_wall={last_wall} exceeds current wall clock {now_wall} by > 5s."
+                        )
+                    cross_interval = effective_interval
+                    if effective_interval > 0.0 and st.get("pid") != os.getpid():
+                        # Account for atomic write/fsync + flock handoff latency in the prior process
+                        cross_interval = effective_interval + 0.030
+                    if cross_interval > 0.0 and wall_elapsed < cross_interval:
+                        cross_wait = cross_interval - wall_elapsed
+                        target_wall_ts = last_wall + cross_interval
                         if cross_wait > wait_needed:
                             wait_needed = cross_wait
                             target_ts = now + wait_needed
-            except Exception:
-                pass
+            except SharedSafetyStateError as exc:
+                self._call_aborted_error = exc
+                raise
 
-        projected_wait = self.cumulative_wait_seconds + wait_needed
+        total_slot_wait = max(0.0, lock_wait_seconds) + wait_needed
+        projected_wait = self.cumulative_wait_seconds + total_slot_wait
         if self.max_queue_wait_seconds > 0.0 and projected_wait > self.max_queue_wait_seconds + 1e-9:
-            raise PacedQueueCapExceededError(
+            err_q = PacedQueueCapExceededError(
                 f"Serial pacing queue cap exceeded: projected wait {projected_wait:.2f}s > "
                 f"max_queue_wait_seconds {self.max_queue_wait_seconds:.2f}s after {self.request_count} calls."
             )
+            self._call_aborted_error = err_q
+            raise err_q
 
         actual_slept = 0.0
         if wait_needed > 0.0 and target_ts is not None:
             first_pass = True
             while True:
                 cur = self._clock_fn()
-                rem = target_ts - cur
+                rem_mono = target_ts - cur
+                rem_wall = 0.0
+                cur_wall: float | None = None
+                if target_wall_ts is not None:
+                    cur_wall = self._now_wall_checked()
+                    rem_wall = target_wall_ts - cur_wall
+                rem = max(rem_mono, rem_wall)
                 if rem <= 0.0:
                     break
                 sleep_dur = rem if first_pass else max(rem, self.early_wake_guard_seconds)
@@ -821,55 +1035,113 @@ class PacedReadTransport:
                     # Non-advancing synthetic clock in unit test (`sleep_fn=lambda s: None`)
                     actual_slept += wait_needed
                     break
+                if target_wall_ts is not None and cur_wall is not None:
+                    after_wall = self._now_wall_checked()
+                    if after_wall <= cur_wall and after >= target_ts:
+                        # Synthetic test advancing only monotonic clock while wall_time_fn is frozen
+                        actual_slept += after - cur
+                        break
                 actual_slept += after - cur
-            self.cumulative_wait_seconds += wait_needed
-            self.actual_slept_seconds += actual_slept
+
+        if total_slot_wait > 0.0:
+            self.cumulative_wait_seconds += total_slot_wait
+            self.actual_slept_seconds += max(0.0, lock_wait_seconds) + actual_slept
+
+        # Re-check 429 cooldown AFTER waking from sleep (catches peer-process 429 recorded mid-sleep!)
+        self.check_persisted_429_cooldown()
+
+        # Persist updated shared pacing state BEFORE granting the slot so write errors fail closed
+        if self.pacing_state_file_path is not None:
+            post_wall = self._now_wall_checked()
+            try:
+                _atomic_write_json(
+                    self.pacing_state_file_path,
+                    {"last_request_wall_epoch": post_wall, "pid": os.getpid()},
+                    "shared pacing state",
+                )
+            except SharedSafetyStateError as exc:
+                self._call_aborted_error = exc
+                raise
 
         stamp = self._clock_fn()
         self._last_request_ts = stamp
         self.request_timestamps.append(stamp)
         self.request_count += 1
-        if self.pacing_state_file_path is not None:
-            try:
-                self.pacing_state_file_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_s = self.pacing_state_file_path.with_suffix(".tmp")
-                tmp_s.write_text(
-                    json.dumps({"last_request_wall_epoch": self._wall_time_fn()}),
-                    encoding="utf-8",
-                )
-                tmp_s.replace(self.pacing_state_file_path)
-            except Exception:
-                pass
         return stamp
 
     def wait_for_slot(self) -> None:
-        """Enforce monotonic `>= min_interval_seconds` spacing, 35s queue cap, and cross-process lock."""
+        """Enforce monotonic `>= min_interval_seconds` spacing, 35s queue cap, and fail-closed shared lock."""
         self.check_persisted_429_cooldown()
+        if self._call_aborted_error is not None:
+            raise self._call_aborted_error
         if self.pacing_state_file_path is None:
-            self._wait_in_process()
+            self._wait_in_process(lock_wait_seconds=0.0)
             return
-        self.pacing_state_file_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = self.pacing_state_file_path.with_suffix(".lock")
-        with lock_path.open("a+", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+        lock_fd: int | None = None
+        try:
+            if self.pacing_state_file_path.exists() and not self.pacing_state_file_path.is_file():
+                raise SharedSafetyStateError(
+                    f"Shared pacing state path is not a regular file: {self.pacing_state_file_path}"
+                )
+            self.pacing_state_file_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.pacing_state_file_path.parent / f".{self.pacing_state_file_path.name}.lock"
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            before_lock = self._clock_fn()
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            after_lock = self._clock_fn()
+            lock_wait = max(0.0, after_lock - before_lock)
+        except SharedSafetyStateError as exc:
+            self._call_aborted_error = exc
+            raise
+        except OSError as exc:
+            err = SharedSafetyStateError(
+                f"Failed to acquire shared pacing lock for {self.pacing_state_file_path}: {exc}"
+            )
+            self._call_aborted_error = err
+            raise err from exc
+
+        try:
+            self.check_persisted_429_cooldown()
+            if self._call_aborted_error is not None:
+                raise self._call_aborted_error
+            self._wait_in_process(lock_wait_seconds=lock_wait)
+        finally:
             try:
-                self.check_persisted_429_cooldown()
-                self._wait_in_process()
-            finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+
+
+class _SuperHttpTransportAdapter(_HttpBaseTransport):
+    """Bypasses a foreign subclass override on `httpx.HTTPTransport` while keeping its pool."""
+
+    def __init__(self, httpx_transport_subclass_instance: Any) -> None:
+        self._transport = httpx_transport_subclass_instance
+
+    def handle_request(self, request: Any) -> Any:
+        assert _httpx is not None
+        return _httpx.HTTPTransport.handle_request(self._transport, request)
+
+    def close(self) -> None:
+        close_fn = getattr(self._transport, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 
 class SharedPacedHttpTransport(_HttpBaseTransport):
-    """HTTP-boundary read-only transport (`httpx.BaseTransport`) shared across compound calls.
+    """HTTP-boundary read-only transport (`httpx.BaseTransport`) shared across fresh clients & compound calls.
 
-    - Wraps an `httpx.BaseTransport` (e.g. `NeoAPI(..., transport=...)` or `rest_client._client._transport`).
+    - Wired at `NeoAPI` client creation (`NeoAPI(..., transport=...)` / `rest_client.session._transport`).
     - Rejects any non-`GET` HTTP method before touching the wire.
     - Enforces shared monotonic `>= 2.5s` spacing (with `strict_guard_seconds` + early-wakeup loop)
-      on EVERY actual HTTP request, even when a single `Kotak_API` wrapper method issues multiple
-      internal HTTP calls (`option_chain`, `spot`, `futures`).
-    - Records `http_request_count` and `http_request_timestamps` separately from adapter-level calls.
-    - Immediately records persisted 429 cooldown and raises `HttpRateLimit429Error` with ZERO retry
-      whenever an HTTP 429 status or exception occurs.
+      on EVERY actual HTTP request across fresh clients and compound `Kotak_API` wrapper calls.
+    - Records `http_request_count` and `http_request_timestamps` on the shared `PacedReadTransport`.
+    - Fails closed immediately on any shared-state error or HTTP 429 with ZERO retry.
     """
 
     def __init__(
@@ -883,6 +1155,24 @@ class SharedPacedHttpTransport(_HttpBaseTransport):
         self.http_request_count: int = 0
         self.http_request_timestamps: list[float] = []
 
+    def _handle_429_abort(self, reason: str, cause: Exception | None = None) -> None:
+        try:
+            self.pacer.record_429_cooldown(reason)
+        except SharedSafetyStateError as state_exc:
+            combo = CooldownPersistence429Error(
+                f"HTTP 429 at Kotak HTTP transport boundary ({reason[:160]}) AND failed to persist "
+                f"shared cooldown state: {state_exc}"
+            )
+            self.pacer._call_aborted_error = combo
+            raise combo from (cause or state_exc)
+        err = HttpRateLimit429Error(
+            f"HTTP 429 at Kotak HTTP transport boundary ({reason[:200]}); hard stop, zero retries."
+        )
+        self.pacer._call_aborted_error = err
+        if cause is not None:
+            raise err from cause
+        raise err
+
     def handle_request(self, request: Any) -> Any:
         method = str(getattr(request, "method", "GET") or "GET").upper()
         if method != "GET":
@@ -890,32 +1180,222 @@ class SharedPacedHttpTransport(_HttpBaseTransport):
                 f"SharedPacedHttpTransport blocked non-GET HTTP method {method!r}; "
                 "analyst market-data transport is strictly read-only."
             )
-        self.pacer.wait_for_slot()
+        if getattr(self.pacer, "_pending_pre_guard_slot", False):
+            # Consume the slot just acquired by _guard_request on initial call before boundary attachment
+            self.pacer._pending_pre_guard_slot = False
+            self.pacer.check_persisted_429_cooldown()
+            if self.pacer._call_aborted_error is not None:
+                raise self.pacer._call_aborted_error
+        else:
+            self.pacer.wait_for_slot()
+
         self.http_request_count += 1
         self.pacer.http_request_count += 1
         if self.pacer.request_timestamps:
-            self.http_request_timestamps.append(self.pacer.request_timestamps[-1])
+            stamp = self.pacer.request_timestamps[-1]
+            self.http_request_timestamps.append(stamp)
+            self.pacer.http_request_timestamps.append(stamp)
 
         try:
             response = self._inner.handle_request(request)
+        except (HttpRateLimit429Error, SharedSafetyStateError):
+            raise
         except Exception as exc:
             msg = str(exc)
             if "429" in msg or "too many" in msg.lower():
-                self.pacer.record_429_cooldown(msg)
-                raise HttpRateLimit429Error(
-                    f"HTTP 429 at Kotak HTTP transport boundary ({msg[:200]}); hard stop, zero retries."
-                ) from exc
+                self._handle_429_abort(msg, cause=exc)
             raise
 
         status_code = getattr(response, "status_code", None)
         if status_code == 429 or str(status_code) == "429":
-            self.pacer.record_429_cooldown("HTTP_429_STATUS")
-            raise HttpRateLimit429Error(
-                "HTTP 429 response at Kotak HTTP transport boundary; hard stop, zero retries."
-            )
+            self._handle_429_abort("HTTP_429_STATUS")
         return response
 
     def close(self) -> None:
         close_fn = getattr(self._inner, "close", None)
         if callable(close_fn):
             close_fn()
+
+
+def unwrap_foreign_pacer_transport(transport: Any) -> Any:
+    """Peel foreign/wrapper pacer transports down to the underlying wire/mock transport.
+
+    Never unwraps native `httpx` or `httpcore` transports (`httpx.HTTPTransport`, `httpx.MockTransport`),
+    so connection pools and simulated mock transports remain completely intact.
+    """
+    cur = transport
+    seen_ids: set[int] = set()
+    while cur is not None and id(cur) not in seen_ids:
+        seen_ids.add(id(cur))
+        if isinstance(cur, SharedPacedHttpTransport):
+            cur = cur._inner
+            continue
+        mod_name = str(getattr(type(cur), "__module__", "") or "")
+        if mod_name.startswith(("httpx", "httpcore")):
+            return cur
+
+        unwrapped = None
+        for inner_attr in (
+            "_inner",
+            "inner",
+            "inner_transport",
+            "_inner_transport",
+            "_transport",
+            "transport",
+            "_wrapped",
+            "wrapped",
+            "_wrapped_transport",
+            "wrapped_transport",
+            "_base_transport",
+            "base_transport",
+            "_delegate",
+            "delegate",
+            "_next",
+            "next_transport",
+        ):
+            cand = getattr(cur, inner_attr, None)
+            if cand is None or cand is cur:
+                continue
+            cand_mod = str(getattr(type(cand), "__module__", "") or "")
+            if cand_mod.startswith("httpcore"):
+                continue
+            if callable(getattr(cand, "handle_request", None)):
+                unwrapped = cand
+                break
+        if unwrapped is not None:
+            cur = unwrapped
+            continue
+
+        if (
+            _httpx is not None
+            and isinstance(cur, _httpx.HTTPTransport)
+            and type(cur) is not _httpx.HTTPTransport
+        ):
+            return _SuperHttpTransportAdapter(cur)
+        return cur
+    return cur
+
+
+def build_paced_client_transport(
+    pacer: PacedReadTransport,
+    existing_transport: Any = None,
+    *,
+    http2: bool = True,
+    limits: Any = None,
+    create_default_if_none: bool = False,
+) -> SharedPacedHttpTransport | None:
+    """Construct a `SharedPacedHttpTransport` for `NeoAPI(..., transport=...)` at client creation."""
+    if isinstance(existing_transport, SharedPacedHttpTransport) and existing_transport.pacer is pacer:
+        return existing_transport
+
+    if existing_transport is not None:
+        inner = unwrap_foreign_pacer_transport(existing_transport)
+        if callable(getattr(inner, "handle_request", None)):
+            return SharedPacedHttpTransport(inner, pacer)
+
+    if not create_default_if_none or _httpx is None:
+        return None
+
+    resolved_limits = limits or _httpx.Limits(max_connections=20, max_keepalive_connections=10)
+    try:
+        wire_tr = _httpx.HTTPTransport(http2=http2, limits=resolved_limits)
+    except ImportError:
+        wire_tr = _httpx.HTTPTransport(http2=False, limits=resolved_limits)
+    return SharedPacedHttpTransport(wire_tr, pacer)
+
+
+def _attach_on_holder(holder: Any, pacer: PacedReadTransport) -> SharedPacedHttpTransport | None:
+    """Attach `SharedPacedHttpTransport` onto `holder._transport` and/or `holder.transport`."""
+    if holder is None:
+        return None
+    wrapped_tr: SharedPacedHttpTransport | None = None
+    orig_seen: Any = None
+    for attr_name in ("_transport", "transport"):
+        if not hasattr(holder, attr_name):
+            continue
+        cur_tr = getattr(holder, attr_name, None)
+        if cur_tr is None or not callable(getattr(cur_tr, "handle_request", None)):
+            continue
+        if isinstance(cur_tr, SharedPacedHttpTransport) and cur_tr.pacer is pacer:
+            wrapped_tr = cur_tr
+            continue
+        if wrapped_tr is None or cur_tr is not orig_seen:
+            orig_seen = cur_tr
+            wrapped_tr = SharedPacedHttpTransport(unwrap_foreign_pacer_transport(cur_tr), pacer)
+        try:
+            setattr(holder, attr_name, wrapped_tr)
+        except Exception:
+            pass
+    return wrapped_tr
+
+
+def attach_paced_transport_to_client(client: Any, pacer: PacedReadTransport) -> bool:
+    """Ensure a newly created client (`NeoAPI`, `RESTClientObject`, `httpx.Client`, or test stub)
+    routes all HTTP requests through `SharedPacedHttpTransport` bound to `pacer`.
+    """
+    if client is None:
+        return False
+
+    # Unwrap outer client proxy if one wraps a NeoAPI client (`_client` / `_inner` with `api_client`)
+    target_cli = client
+    if not hasattr(target_cli, "api_client"):
+        for proxy_attr in ("_client", "_inner", "client"):
+            maybe_inner = getattr(target_cli, proxy_attr, None)
+            if maybe_inner is not None and hasattr(maybe_inner, "api_client"):
+                target_cli = maybe_inner
+                break
+
+    attached = False
+    api_cli = getattr(target_cli, "api_client", None)
+    rest_cli = getattr(api_cli, "rest_client", None) if api_cli is not None else None
+
+    if rest_cli is not None:
+        # Disable any duplicate SDK-internal token-bucket limiter so our pacer is sole authority
+        if hasattr(rest_cli, "rate_limiter") and getattr(rest_cli, "rate_limiter", None) is not None:
+            try:
+                rest_cli.rate_limiter = None
+            except Exception:
+                pass
+
+        # 1. Primary kotakneoapi v3.0.13 holder: `rest_client.session` (`httpx.Client`)
+        session_obj = getattr(rest_cli, "session", None)
+        if session_obj is not None:
+            sess_wrapped = _attach_on_holder(session_obj, pacer)
+            if sess_wrapped is not None:
+                attached = True
+                for rc_attr in ("_transport", "transport"):
+                    if hasattr(rest_cli, rc_attr):
+                        try:
+                            setattr(rest_cli, rc_attr, sess_wrapped)
+                        except Exception:
+                            pass
+            mounts = getattr(session_obj, "_mounts", None)
+            if isinstance(mounts, dict) and mounts:
+                for m_key, m_tr in list(mounts.items()):
+                    if m_tr is None or (
+                        isinstance(m_tr, SharedPacedHttpTransport) and m_tr.pacer is pacer
+                    ):
+                        continue
+                    if callable(getattr(m_tr, "handle_request", None)):
+                        mounts[m_key] = SharedPacedHttpTransport(
+                            unwrap_foreign_pacer_transport(m_tr), pacer
+                        )
+                        attached = True
+
+        # 2. Secondary holder: `rest_client._client` (custom wrappers / test doubles)
+        httpx_cli = getattr(rest_cli, "_client", None)
+        if httpx_cli is not None and _attach_on_holder(httpx_cli, pacer) is not None:
+            attached = True
+
+        # 3. Direct `rest_client._transport` / `rest_client.transport` fallback
+        if not attached and _attach_on_holder(rest_cli, pacer) is not None:
+            attached = True
+
+    # 4. Direct `client.session`, `client._client`, or `client` transport fallback
+    if not attached:
+        for holder in (getattr(client, "session", None), getattr(client, "_client", None), client):
+            if _attach_on_holder(holder, pacer) is not None:
+                attached = True
+                break
+
+    return attached
