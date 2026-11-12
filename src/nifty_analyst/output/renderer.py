@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from nifty_analyst.scrubber import SecretScrubber
 from nifty_analyst.state import CandidateStructure, NiftyOptionsState
+from nifty_analyst.synthesis.personas import normalize_state_narrative_from_verified_facts
 
 
 def _format_candidate_row(c: CandidateStructure) -> str:
@@ -39,8 +40,9 @@ def render_analyst_report(
     state: NiftyOptionsState,
     scrubber: SecretScrubber | None = None,
 ) -> str:
-    """Render the 7-section research report from NiftyOptionsState."""
+    """Render the 7-section research report strictly from verified NiftyOptionsState facts."""
     scrubber = scrubber or SecretScrubber()
+    state = normalize_state_narrative_from_verified_facts(state)
     meta = state.run_metadata
     ctx = state.contract_context
     ev = state.market_evidence
@@ -269,9 +271,14 @@ def render_analyst_report(
                 if leg.visible_depth_qty is not None
                 else f"{leg.top_book_depth_lots} lots"
             )
+            walk_parts: list[str] = []
+            if leg.vwap_fill_price is not None and leg.fill_basis == "FULL_SIZE_BOOK_WALK":
+                walk_parts.append(f"walked VWAP {leg.vwap_fill_price:.4f}")
+            if leg.executable_entry_price is not None:
+                walk_parts.append(f"executable entry {leg.executable_entry_price:.2f} pts")
             walk_str = (
-                f"; walked VWAP {leg.vwap_fill_price:.4f} ({leg.fill_basis})"
-                if leg.vwap_fill_price is not None and leg.fill_basis == "FULL_SIZE_BOOK_WALK"
+                f"; {', '.join(walk_parts)} ({leg.fill_basis})"
+                if walk_parts
                 else f" ({leg.fill_basis})"
             )
             lines.append(

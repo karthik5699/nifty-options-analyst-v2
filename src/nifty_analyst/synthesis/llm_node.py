@@ -43,6 +43,7 @@ from nifty_analyst.synthesis.personas import (
     build_compact_desk_brief,
     build_deterministic_personas,
     build_single_pass_persona_prompt,
+    build_verified_report_narrative,
     is_pre_llm_live_ready_eligible,
     parse_optional_persona_states,
 )
@@ -101,11 +102,23 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
         vol = state.market_evidence.volatility_state
         pos = state.market_evidence.derivatives_positioning
 
-        eligible = [c for c in state.candidate_structures if c.part_a_overall_status == "PASS"]
-        debate, triad, consolidator, chosen = build_deterministic_personas(
+        eligible = [
+            c
+            for c in state.candidate_structures
+            if c.part_a_overall_status == "PASS" and c.full_size_fill_supported
+        ]
+        _, _, _, chosen = build_deterministic_personas(
             state=state,
             default_primary=primary,
             eligible_candidates=eligible,
+        )
+        narrative = build_verified_report_narrative(
+            state=state,
+            selected_primary=chosen,
+            eligible_candidates=eligible,
+            verdict=("SUGGESTION" if chosen is not None else "WAIT"),
+            is_live_ready=is_pre_llm_live_ready_eligible(state, chosen),
+            verifier_passed=True,
         )
 
         citations: list[dict[str, Any]] = [
@@ -185,84 +198,18 @@ class OfflineDeterministicSynthesisProvider(LLMProvider):
                 ]
             )
 
-            reasoning = (
-                f"Spot is at {spot} (`contract_context.spot.value`) with 1D structure in "
-                f"`{ps.trend_1d_state}` (`market_evidence.price_structure.trend_1d_state`), "
-                f"completed 1H MA20 at {ps.ma20_1h} (`market_evidence.price_structure.ma20_1h`), "
-                f"and 1H RSI(14) at {ps.rsi_14_1h} (`market_evidence.price_structure.rsi_14_1h`). "
-                f"90-session IVP stands at {vol.ivp_90d} (`market_evidence.volatility_state.ivp_90d`) "
-                f"in `{vol.term_structure_regime}` term structure with Put OI support at "
-                f"{pos.put_oi_wall_strike} and Call OI resistance at {pos.call_oi_wall_strike}. "
-                f"Following Bull/Bear/Vol debate and Risk Triad review, Consolidator selects "
-                f"`{chosen.structure_id}` ({chosen.structure_type}, `{chosen.expiry_date}`, "
-                f"Tech+Options score {chosen.technical_options_score}/100) with contractual payoff bound "
-                f"Rs {chosen.contractual_max_loss_rs:.2f} (<= Rs 10,000 ceiling), managed stop "
-                f"Rs {chosen.planned_stop_rs:.2f}, and portfolio summed stop "
-                f"Rs {chosen.portfolio_summed_stop_after_trade_rs:.2f}. Thesis invalidates on a "
-                f"{chosen.invalidation_candle_basis} beyond {chosen.invalidation_level}."
-            )
-        else:
-            reasoning = (
-                f"Spot is at {spot} (`contract_context.spot.value`) with 1D trend `{ps.trend_1d_state}` "
-                f"and 90-session IVP at {vol.ivp_90d}. Consolidator recommends sitting out (`WAIT`): "
-                f"no candidate satisfied both deterministic Part A rules and multi-persona regime alignment."
-            )
-
-        habitual_note = (
-            "All defined-risk families (Bull/Bear Credit & Debit Verticals, Iron Condors, Iron Butterflies, "
-            "Directional Butterflies, and Legged Condor Components) were priced and scored solely on "
-            "technical alignment and options surface edge (STT excluded per trader directive)."
-        )
-
-        wide_failed = [
-            c
-            for c in state.candidate_structures
-            if c.width_points >= 200.0 and c.contractual_max_loss_rs > 10000.0
-        ]
-        if wide_failed:
-            w = wide_failed[0]
-            challenge_note = (
-                f"RESEARCH NOTE (Between-Trade Context): Habitual 200-pt width structure `{w.structure_id}` "
-                f"(lot_size={w.lot_size}) has a contractual max loss of Rs {w.contractual_max_loss_rs:.2f}, "
-                f"exceeding the Rs 10,000 per-trade ceiling unless net credit exceeds "
-                f"{(w.width_points - 10000.0 / w.lot_size):.1f} pts or wing width is 150 pts / smaller lot expiry."
-            )
-        else:
-            challenge_note = "None. All Part A rules and Part B style heuristics are consistent on this snapshot."
-
-        if is_pre_llm_live_ready_eligible(state, chosen):
-            conf_note = (
-                f"LIVE-READY ({consolidator.conviction} conviction; IVP verified and all Part A checks PASS)."
-            )
-        elif state.run_metadata.mode == "LIVE_MORNING_SNAPSHOT":
-            conf_note = (
-                "RESEARCH-ONLY: Live readiness gates remain OFF (unverified exchange quote timestamps, "
-                "single-expiry / held-contract surface coverage, and HTTP-boundary 2.5s pacing)."
-            )
-        elif state.portfolio_exposure_state.portfolio_state_status != "VERIFIED":
-            conf_note = "RESEARCH-ONLY: Portfolio open-position state is UNKNOWN (fail-closed)."
-        elif vol.ivp_30d == "UNKNOWN" or vol.ivp_90d == "UNKNOWN":
-            conf_note = (
-                "RESEARCH-ONLY: Verified historical IVP is UNKNOWN; output cannot be "
-                "used for live execution until IVP history is populated."
-            )
-        elif chosen is None:
-            conf_note = "RESEARCH-ONLY: Consolidator / Part A verdict is WAIT (no live trade proposed)."
-        else:
-            conf_note = f"RESEARCH-ONLY: primary candidate Part A status is {chosen.part_a_overall_status}."
-
         return LLMSynthesisResponse(
             model_id=self.model_id,
-            reasoning_summary=reasoning,
-            habitual_comparison_note=habitual_note,
-            research_rule_challenge_note=challenge_note,
-            confidence_note=conf_note,
+            reasoning_summary=narrative.reasoning_summary,
+            habitual_comparison_note=narrative.habitual_comparison_note,
+            research_rule_challenge_note=narrative.research_rule_challenge_note,
+            confidence_note=narrative.confidence_note,
             citations=citations,
             estimated_tokens_used=0,
             estimated_cost_inr=0.0,
-            debate_state=debate,
-            risk_triad_state=triad,
-            consolidator_state=consolidator,
+            debate_state=narrative.debate_state,
+            risk_triad_state=narrative.risk_triad_state,
+            consolidator_state=narrative.consolidator_state,
         )
 
 

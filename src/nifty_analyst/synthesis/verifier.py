@@ -35,7 +35,8 @@ _STRUCT_ID_RE = re.compile(
 _FOREIGN_UNDERSCORE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])[A-Z][A-Z0-9]*_[A-Z0-9_-]+(?![A-Za-z0-9_-])"
 )
-_RUPEE_RE = re.compile(r"\bRs\.?\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+_RUPEE_PREFIX_PAT = r"(?:₹|\b(?:Rs\.?|INR))\s*"
+_RUPEE_RE = re.compile(_RUPEE_PREFIX_PAT + r"([0-9][0-9,]*(?:\.[0-9]+)?)")
 _DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _INDEX_LEVEL_RE = re.compile(r"(?<![0-9-])(1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})(?:\.(\d+))?(?![0-9-])")
 _COMPACT_LEG_RE = re.compile(
@@ -43,6 +44,61 @@ _COMPACT_LEG_RE = re.compile(
 )
 _VERB_LEG_RE = re.compile(
     r"\b(?P<verb>Buy|Sell|Long|Short)\s+(?:(?P<ratio>\d+)x\s*)?(?P<strike>1[5-9]\d{3}|2\d{4}|3[0-4]\d{3})\s*(?P<opt>CE|PE)\b",
+    re.IGNORECASE,
+)
+_LEG_TRAILING_PRICE_RE = re.compile(
+    r"^\s*(?:@|at|for|=|around|near)\s*~?\s*(?:₹|\b(?:Rs\.?|INR)\s*)?([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*(?:pts?|points?))?",
+    re.IGNORECASE,
+)
+_POINTS_VALUE_RE = re.compile(
+    r"\b([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:pts?|points?)\b",
+    re.IGNORECASE,
+)
+_SELECTED_TRADE_SUBJECT_PAT = (
+    r"(?:"
+    r"(?:selected|chosen|recommended|primary|proposed)\s+"
+    r"(?:trade|selection|pick|proposal|recommendation|position|spread|strategy|condor|butterfly|vertical|structure)"
+    r"|(?:the|this|our)\s+(?:trade|selection|pick|proposal|recommendation|position)"
+    r")"
+)
+_DIR_WORD_PAT = r"(?P<dir>bullish|bearish|(?:delta[-\s]+|market[-\s]+)?neutral)"
+_TRADE_DIR_BEFORE_RE = re.compile(
+    r"\b(?:selected|chosen|recommended|primary|proposed)\s+(?:a\s+|an\s+)?"
+    + _DIR_WORD_PAT
+    + r"(?:\s+(?:defined-risk|options?|credit|debit|vertical))?\s+"
+    r"(?:trade|selection|pick|proposal|recommendation|position|spread|strategy|condor|butterfly|vertical|structure)\b",
+    re.IGNORECASE,
+)
+_TRADE_DIR_AFTER_RE = re.compile(
+    r"\b"
+    + _SELECTED_TRADE_SUBJECT_PAT
+    + r"\b[^.!?;,\n]{0,35}?\b(?:is|are|remains|stays|was|as|with\s+a|has\s+a|carries\s+a)\s+"
+    r"(?:a\s+|an\s+|strictly\s+|purely\s+|decidedly\s+|net\s+)?"
+    + _DIR_WORD_PAT
+    + r"\b",
+    re.IGNORECASE,
+)
+_STRUCT_ID_DIR_RE = re.compile(
+    r"`?(?P<sid>"
+    + _STRUCT_ID_RE.pattern
+    + r")`?[^.!?;,\n]{0,25}?\b(?:is|as|remains|carries\s+a)\s+(?:a\s+|an\s+)?"
+    + _DIR_WORD_PAT
+    + r"\b",
+    re.IGNORECASE,
+)
+_PROFIT_GUARANTEE_RE = re.compile(
+    r"\b(?:"
+    r"guaranteed\s+(?:to\s+)?(?:be\s+)?(?:profit\w*|gain\w*|win\w*|return\w*|make\s+money|succeed\w*)"
+    r"|(?:profit\w*|gain\w*|win\w*|return\w*)\s+(?:is|are)\s+guaranteed"
+    r"|(?:cannot|can't|can\s+not|never|impossible\s+to)\s+lose"
+    r"|risk[-\s]+free"
+    r"|no\s+(?:risk|chance|possibility|probability)\s+of\s+(?:any\s+)?loss"
+    r"|zero\s+(?:max(?:imum)?\s+)?(?:loss|downside)"
+    r"|100(?:\.0+)?%\s*(?:pop|win\w*|probabilit\w*|certain\w*|safe\w*|profit\w*)"
+    r"|sure[-\s]*shot"
+    r"|free\s+money"
+    r"|certain\s+profit\w*"
+    r")\b",
     re.IGNORECASE,
 )
 _FOREIGN_INSTRUMENT_RE = re.compile(
@@ -146,6 +202,7 @@ _ALLOWED_STATIC_UPPER_WORDS: frozenset[str] = frozenset(
         "ZERO",
         "EXPIRY",
         "MACRO",
+        "INR",
     }
 )
 
@@ -294,6 +351,119 @@ def _allowed_upper_words_for_state(state: NiftyOptionsState) -> set[str]:
     return allowed
 
 
+def _normalize_dir_word(raw_dir: str) -> str:
+    low = raw_dir.lower()
+    if "neutral" in low:
+        return "NEUTRAL"
+    if "bull" in low:
+        return "BULLISH"
+    return "BEARISH"
+
+
+def _allowed_rupee_numbers(
+    state: NiftyOptionsState, scoped_cands: Sequence[CandidateStructure]
+) -> list[float]:
+    nums: list[float] = [
+        2000.0,
+        10000.0,
+        state.portfolio_exposure_state.summed_planned_stops_rs,
+        state.portfolio_exposure_state.remaining_stop_budget_rs,
+    ]
+    for op in state.portfolio_exposure_state.open_positions:
+        nums.append(op.planned_stop_rs)
+        nums.append(abs(op.current_executable_spread_value_rs))
+    for c in scoped_cands:
+        nums.extend(
+            [
+                c.contractual_max_loss_rs,
+                c.planned_stop_rs,
+                c.portfolio_summed_stop_after_trade_rs,
+                c.margin_estimate_rs,
+                c.max_profit_rs,
+                c.overnight_gap_stress_3pct_loss_rs,
+                c.statutory_charges.total_charges_rs,
+                0.55 * c.max_profit_rs,
+                abs(c.net_theta_daily_rs),
+                abs(c.net_vega_rs),
+            ]
+        )
+        if not c.full_size_fill_supported:
+            nums.append(c.indicative_touch_max_loss_rs)
+    return nums
+
+
+def _rupee_matches_allowed(val: float, allowed_rs: Sequence[float]) -> bool:
+    return any(abs(val - k) <= (0.01 if abs(k) < 5.0 else 1.05) for k in allowed_rs)
+
+
+def _allowed_points_values(
+    state: NiftyOptionsState, scoped_cands: Sequence[CandidateStructure]
+) -> list[float]:
+    ps = state.market_evidence.price_structure
+    vol = state.market_evidence.volatility_state
+    pos = state.market_evidence.derivatives_positioning
+    pts: list[float] = [
+        ps.atr_14_1h,
+        ps.atr_14_1d,
+        abs(vol.skew_25d_put_minus_call * 100.0),
+        abs(vol.iv_rv_spread * 100.0),
+        abs(vol.term_structure_slope_near_minus_far * 100.0),
+        100.0,
+        150.0,
+        200.0,
+    ]
+    if pos.intraday_spot_change_pts is not None:
+        pts.append(abs(pos.intraday_spot_change_pts))
+    for c in scoped_cands:
+        pts.extend(
+            [
+                c.executable_net_points_per_unit,
+                c.slippage_buffer_points_per_unit,
+                c.width_points,
+                abs(c.indicative_stop_spread_value_per_unit),
+                abs(c.width_points - 10000.0 / max(1, c.lot_size)),
+            ]
+        )
+        if not c.full_size_fill_supported:
+            pts.append(c.indicative_touch_net_points_per_unit)
+        for leg in c.legs:
+            if leg.executable_entry_price is not None:
+                pts.append(leg.executable_entry_price)
+            if leg.vwap_fill_price is not None:
+                pts.append(leg.vwap_fill_price)
+            if leg.fill_basis != "FULL_SIZE_BOOK_WALK" or (
+                leg.executable_entry_price is None and leg.vwap_fill_price is None
+            ):
+                pts.extend([leg.mid, leg.bid, leg.ask])
+    return pts
+
+
+def _leg_price_matches_candidate(
+    cand: CandidateStructure,
+    strike_int: int,
+    opt_type: str,
+    price_val: float,
+    expected_side: str | None = None,
+    expected_ratio: int | None = None,
+) -> bool:
+    for leg in cand.legs:
+        if int(round(leg.strike)) == strike_int and leg.option_type == opt_type:
+            if expected_side is not None and leg.side != expected_side:
+                continue
+            if expected_ratio is not None and leg.ratio != expected_ratio:
+                continue
+            allowed_p: list[float] = []
+            if leg.executable_entry_price is not None:
+                allowed_p.append(leg.executable_entry_price)
+            if leg.vwap_fill_price is not None:
+                allowed_p.append(leg.vwap_fill_price)
+            if leg.fill_basis != "FULL_SIZE_BOOK_WALK" or not allowed_p:
+                allowed_p.extend([leg.mid, leg.bid, leg.ask])
+            if any(abs(price_val - ap) <= 0.55 for ap in allowed_p):
+                return True
+    return False
+
+
 def _leg_matches_candidate(
     cand: CandidateStructure,
     strike_int: int,
@@ -340,14 +510,30 @@ def _check_trade_directives_quantities_and_symbols(
         checked += 1
         errors.append(f"{field_name}:FOREIGN_INSTRUMENT:{m_fi.group(0)}")
 
-    # 2. Unlisted uppercase ticker / contract words (>= 4 chars)
+    # 2. Unlisted uppercase ticker / contract words (>= 4 chars) & qualitative profit-guarantee blocklist
     clean_upper_scan = re.sub(r"`[a-z0-9_.\[\]]+`", " ", text)
+    for _ in _PROFIT_GUARANTEE_RE.finditer(clean_upper_scan):
+        checked += 1
+        errors.append(f"{field_name}:FALSE_PROFIT_GUARANTEE_CLAIM")
+
     clean_upper_scan = _STRUCT_ID_RE.sub(" ", clean_upper_scan)
     clean_upper_scan = _FOREIGN_UNDERSCORE_TOKEN_RE.sub(" ", clean_upper_scan)
     for uw in _UPPER_WORD_RE.findall(clean_upper_scan):
         checked += 1
         if uw not in allowed_upper_words:
             errors.append(f"{field_name}:FOREIGN_UPPER_SYMBOL:{uw}")
+
+    # 2b. Trade / selection direction binding (`bullish` / `bearish` / `neutral` must match candidate direction)
+    for dir_re in (_TRADE_DIR_BEFORE_RE, _TRADE_DIR_AFTER_RE, _STRUCT_ID_DIR_RE):
+        for m_dir in dir_re.finditer(text):
+            claimed_dir = _normalize_dir_word(m_dir.group("dir"))
+            checked += 1
+            if not scoped_candidates:
+                errors.append(f"{field_name}:TRADE_DIRECTION_ON_WAIT:{claimed_dir}")
+            elif not any(c.direction == claimed_dir for c in scoped_candidates):
+                errors.append(
+                    f"{field_name}:WRONG_TRADE_DIRECTION:{claimed_dir}!=expected:{sorted({c.direction for c in scoped_candidates})}"
+                )
 
     # 3. Unit, lot, and contract count binding
     for m_qty in re.finditer(r"\b(\d[\d,]*)\s*(?:units?|qty|quantities)\b", text, re.IGNORECASE):
@@ -390,7 +576,7 @@ def _check_trade_directives_quantities_and_symbols(
         if verb in ("BUY", "SELL"):
             m_bs = _STRICT_BUY_SELL_LEG_RE.match(tail)
             if m_bs is None:
-                errors.append(f"{field_name}:UNBOUND_TRADE_DIRECTIVE:{tail[:32].strip()}")
+                errors.append(f"{field_name}:UNBOUND_TRADE_DIRECTIVE:{verb}")
                 continue
             exp_side = "LONG" if verb == "BUY" else "SHORT"
             k_int = int(m_bs.group("strike"))
@@ -402,6 +588,15 @@ def _check_trade_directives_quantities_and_symbols(
                 selected_primary, k_int, opt_t, exp_side, r_int, q_int, q_kind
             ):
                 errors.append(f"{field_name}:WRONG_DIRECTIVE_LEG:{verb}_{k_int}{opt_t}")
+                continue
+            m_tp = _LEG_TRAILING_PRICE_RE.match(tail[m_bs.end() :])
+            if m_tp is not None:
+                p_val = float(m_tp.group(1).replace(",", ""))
+                checked += 1
+                if not _leg_price_matches_candidate(
+                    selected_primary, k_int, opt_t, p_val, exp_side, r_int
+                ):
+                    errors.append(f"{field_name}:WRONG_LEG_ENTRY_PRICE:{k_int}{opt_t}@{p_val}")
         else:
             m_es = _STRICT_ENTER_EXEC_STRUCT_RE.match(tail)
             if m_es is not None:
@@ -412,7 +607,7 @@ def _check_trade_directives_quantities_and_symbols(
                 continue
             m_el = _STRICT_ENTER_EXEC_LEG_RE.match(tail)
             if m_el is None:
-                errors.append(f"{field_name}:UNBOUND_ENTER_EXECUTE:{tail[:32].strip()}")
+                errors.append(f"{field_name}:UNBOUND_ENTER_EXECUTE:{verb}")
                 continue
             k_int = int(m_el.group("strike"))
             opt_t = m_el.group("opt").upper()
@@ -423,11 +618,20 @@ def _check_trade_directives_quantities_and_symbols(
                 selected_primary, k_int, opt_t, None, r_int, q_int, q_kind
             ):
                 errors.append(f"{field_name}:WRONG_ENTER_EXECUTE_LEG:{k_int}{opt_t}")
+                continue
+            m_tp = _LEG_TRAILING_PRICE_RE.match(tail[m_el.end() :])
+            if m_tp is not None:
+                p_val = float(m_tp.group(1).replace(",", ""))
+                checked += 1
+                if not _leg_price_matches_candidate(
+                    selected_primary, k_int, opt_t, p_val, None, r_int
+                ):
+                    errors.append(f"{field_name}:WRONG_LEG_ENTRY_PRICE:{k_int}{opt_t}@{p_val}")
 
     # 5. `Long` / `Short` futures or ticker directives, plus `_VERB_LEG_RE` & `_COMPACT_LEG_RE`
     for m_ls in _LONG_SHORT_INSTRUMENT_RE.finditer(text):
         checked += 1
-        errors.append(f"{field_name}:UNBOUND_LONG_SHORT_TARGET:{m_ls.group(0)}")
+        errors.append(f"{field_name}:UNBOUND_LONG_SHORT_TARGET:{m_ls.group('verb').upper()}")
 
     for m_vleg in _VERB_LEG_RE.finditer(text):
         verb = m_vleg.group("verb").upper()
@@ -440,6 +644,16 @@ def _check_trade_directives_quantities_and_symbols(
             _leg_matches_candidate(c, k_int, opt, exp_side, r_int) for c in scoped_candidates
         ):
             errors.append(f"{field_name}:WRONG_VERB_LEG:{verb}_{k_int}{opt}")
+            continue
+        m_tp = _LEG_TRAILING_PRICE_RE.match(text[m_vleg.end() :])
+        if m_tp is not None:
+            p_val = float(m_tp.group(1).replace(",", ""))
+            checked += 1
+            if not any(
+                _leg_price_matches_candidate(c, k_int, opt, p_val, exp_side, r_int)
+                for c in scoped_candidates
+            ):
+                errors.append(f"{field_name}:WRONG_LEG_ENTRY_PRICE:{k_int}{opt}@{p_val}")
 
     oi_ref_strikes = {
         (int(round(pos.put_oi_wall_strike)), "PE"),
@@ -457,12 +671,28 @@ def _check_trade_directives_quantities_and_symbols(
         if side_tok:
             exp_side = "SHORT" if side_tok in ("S", "SHORT") else "LONG"
         checked += 1
-        if not is_digest and side_tok is None and ratio_tok is None and (k_int, opt) in oi_ref_strikes:
+        m_tp = _LEG_TRAILING_PRICE_RE.match(text[m_leg.end() :])
+        if (
+            not is_digest
+            and side_tok is None
+            and ratio_tok is None
+            and m_tp is None
+            and (k_int, opt) in oi_ref_strikes
+        ):
             continue
         if not scoped_candidates or not any(
             _leg_matches_candidate(c, k_int, opt, exp_side, r_int) for c in scoped_candidates
         ):
-            errors.append(f"{field_name}:WRONG_LEG_SPEC:{m_leg.group(0).strip()}")
+            errors.append(f"{field_name}:WRONG_LEG_SPEC:{k_int}{opt}")
+            continue
+        if m_tp is not None:
+            p_val = float(m_tp.group(1).replace(",", ""))
+            checked += 1
+            if not any(
+                _leg_price_matches_candidate(c, k_int, opt, p_val, exp_side, r_int)
+                for c in scoped_candidates
+            ):
+                errors.append(f"{field_name}:WRONG_LEG_ENTRY_PRICE:{k_int}{opt}@{p_val}")
 
     # 6. Expiry date, DTE, and Net Credit / Debit claims
     text_no_sids = _STRUCT_ID_RE.sub(" ", text)
@@ -497,7 +727,17 @@ def _check_trade_directives_quantities_and_symbols(
             and abs(pts_v - c.executable_net_points_per_unit) <= 0.25
             for c in scoped_candidates
         ):
-            errors.append(f"{field_name}:WRONG_NET_ENTRY:{m_entry.group(0)}")
+            errors.append(f"{field_name}:WRONG_NET_ENTRY:{pts_v}")
+
+    allowed_pts = _allowed_points_values(state, scoped_candidates)
+    for m_pts in _POINTS_VALUE_RE.finditer(text):
+        prefix_vol = text[max(0, m_pts.start() - 6) : m_pts.start()].lower()
+        if prefix_vol.endswith("vol "):
+            continue
+        p_val = float(m_pts.group(1).replace(",", ""))
+        checked += 1
+        if not any(abs(p_val - ap) <= 0.55 for ap in allowed_pts):
+            errors.append(f"{field_name}:WRONG_POINTS_VALUE:{p_val}")
 
     return checked
 
@@ -576,19 +816,7 @@ def validate_supplied_digest(
     )
 
     # Candidate-scoped Rupee check (ONLY selected_primary's rupee figures + policy caps allowed!)
-    allowed_selected_rs = [
-        selected_primary.contractual_max_loss_rs,
-        selected_primary.planned_stop_rs,
-        selected_primary.portfolio_summed_stop_after_trade_rs,
-        selected_primary.margin_estimate_rs,
-        selected_primary.max_profit_rs,
-        selected_primary.overnight_gap_stress_3pct_loss_rs,
-        selected_primary.statutory_charges.total_charges_rs,
-        0.55 * selected_primary.max_profit_rs,
-        state.portfolio_exposure_state.summed_planned_stops_rs,
-        2000.0,
-        10000.0,
-    ]
+    allowed_selected_rs = _allowed_rupee_numbers(state, [selected_primary])
     stripped = _STRUCT_ID_RE.sub(" ", text)
     stripped = _DATE_RE.sub(" ", stripped)
 
@@ -596,28 +824,36 @@ def validate_supplied_digest(
         raw_num = m_rs.group(1).replace(",", "")
         val = float(raw_num)
         checked += 1
-        if not any(abs(val - a) <= 1.05 for a in allowed_selected_rs):
+        if not _rupee_matches_allowed(val, allowed_selected_rs):
             errors.append(f"digest:WRONG_RS_FOR_SELECTED:Rs {raw_num}")
 
     # Label-bound Rupee checks inside digest (catches swapping margin vs max loss on same candidate!)
     for pat, expected_val, tag in (
         (
-            r"(?:max(?:imum)?\s+loss|contractual(?:\s+max(?:imum)?)?\s+(?:loss|bound|cap))\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:max(?:imum)?\s+loss|contractual(?:\s+max(?:imum)?)?\s+(?:loss|bound|cap))\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             selected_primary.contractual_max_loss_rs,
             "MAX_LOSS",
         ),
         (
-            r"(?<!summed\s)(?<!portfolio\s)(?:managed\s+stop|planned\s+stop|stop)\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?<!summed\s)(?<!portfolio\s)(?:managed\s+stop|planned\s+stop|stop)\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             selected_primary.planned_stop_rs,
             "PLANNED_STOP",
         ),
         (
-            r"(?:summed\s+(?:portfolio\s+)?stop|portfolio\s+summed\s+stop)\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:summed\s+(?:portfolio\s+)?stop|portfolio\s+summed\s+stop)\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             selected_primary.portfolio_summed_stop_after_trade_rs,
             "SUMMED_STOP",
         ),
         (
-            r"margin(?:\s+estimate)?\s*(?:of|is|=|:|~)?\s*~?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"margin(?:\s+estimate)?\s*(?:of|is|=|:|~)?\s*~?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             selected_primary.margin_estimate_rs,
             "MARGIN",
         ),
@@ -687,31 +923,41 @@ def _check_sentence_semantic_labels(
     # Candidate-meaning bindings (checked against `scoped_candidates` for this sentence!)
     cand_bindings: list[tuple[str, Any, float, str]] = [
         (
-            r"(?:contractual\s+(?:max(?:imum)?\s+loss|payoff\s+bound|bound|cap)|max(?:imum)?\s+loss)\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:contractual\s+(?:max(?:imum)?\s+loss|payoff\s+bound|bound|cap)|max(?:imum)?\s+loss)\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.contractual_max_loss_rs],
             1.05,
             "CONTRACTUAL_MAX_LOSS",
         ),
         (
-            r"(?:managed|planned)\s+stop\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:managed|planned)\s+stop\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.planned_stop_rs, 2000.0],
             1.05,
             "PLANNED_STOP",
         ),
         (
-            r"(?:portfolio\s+summed\s+stop|summed\s+portfolio\s+stop)(?:\s+after\s+trade|\s+post-trade)?\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:portfolio\s+summed\s+stop|summed\s+portfolio\s+stop)(?:\s+after\s+trade|\s+post-trade)?\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.portfolio_summed_stop_after_trade_rs],
             1.05,
             "PORTFOLIO_SUMMED_STOP",
         ),
         (
-            r"\bmargin(?:\s+estimate)?\s*(?:of|is|=|:|~)?\s*~?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"\bmargin(?:\s+estimate)?\s*(?:of|is|=|:|~)?\s*~?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.margin_estimate_rs],
             1.05,
             "MARGIN_ESTIMATE",
         ),
         (
-            r"\bmax\s+profit\s*(?:of|is|=|:)?\s*Rs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"\bmax\s+profit\s*(?:of|is|=|:)?\s*"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.max_profit_rs],
             1.05,
             "MAX_PROFIT",
@@ -735,7 +981,9 @@ def _check_sentence_semantic_labels(
             "INVALIDATION_LEVEL",
         ),
         (
-            r"(?:overnight\s+gap[^R\n]{0,45}?stress[^R\n]{0,45}?|gap-stress\s+alternative[^R\n]{0,45}?)\bRs\.?\s*([0-9,]+(?:\.[0-9]+)?)",
+            r"(?:overnight\s+gap[^\n]{0,45}?stress[^\n]{0,45}?|gap-stress\s+alternative[^\n]{0,45}?)"
+            + _RUPEE_PREFIX_PAT
+            + r"([0-9,]+(?:\.[0-9]+)?)",
             lambda c: [c.overnight_gap_stress_3pct_loss_rs],
             1.05,
             "OVERNIGHT_GAP_STRESS",
@@ -863,6 +1111,7 @@ def _scan_prose_fields_semantically(
             allowed_nums = list(market_nums)
             for c in scoped_cands:
                 allowed_nums.extend(_candidate_numbers(c))
+            allowed_rs = _allowed_rupee_numbers(state, scoped_cands)
 
             stripped = _STRUCT_ID_RE.sub(" ", sent)
             stripped = _DATE_RE.sub(" ", stripped)
@@ -874,7 +1123,7 @@ def _scan_prose_fields_semantically(
                 except ValueError:
                     continue
                 checked_count += 1
-                if not any(abs(val - k) <= 1.05 for k in allowed_nums):
+                if not _rupee_matches_allowed(val, allowed_rs):
                     uncited.append(f"{field_name}:Rs {raw_num}")
 
             stripped_no_rs = _RUPEE_RE.sub(" ", stripped)
@@ -900,6 +1149,7 @@ def verify_llm_synthesis(
     prose_fields: Mapping[str, str] | None = None,
     supplied_whatsapp_digest: str | None = None,
     expected_is_live_ready: bool | None = None,
+    debate_dominant_regime: str | None = None,
 ) -> tuple[list[LLMClaimCitation], VerifierReport]:
     """Deterministically verify citations, all delivered prose fields, supplied digest, and Part A."""
     state_dict = state.to_dict()
@@ -908,7 +1158,6 @@ def verify_llm_synthesis(
     failure_reasons: list[str] = []
 
     for item in raw_citations:
-        claim_text = str(item.get("claim_text", "")).strip()
         field_path = str(item.get("state_field_path", "")).strip()
         cited_val = item.get("cited_value")
 
@@ -919,7 +1168,7 @@ def verify_llm_synthesis(
             failure_reasons.append(note)
             verified_citations.append(
                 LLMClaimCitation(
-                    claim_text=claim_text,
+                    claim_text=f"Unverified `{field_path}`",
                     state_field_path=field_path,
                     cited_value=str(cited_val),
                     verified_in_state=False,
@@ -941,7 +1190,11 @@ def verify_llm_synthesis(
 
         verified_citations.append(
             LLMClaimCitation(
-                claim_text=claim_text,
+                claim_text=(
+                    f"Verified `{field_path}` = {actual_val!r}"
+                    if matched
+                    else f"Mismatched `{field_path}`"
+                ),
                 state_field_path=field_path,
                 cited_value=(
                     cited_val if isinstance(cited_val, (int, float, str, bool)) else str(cited_val)
@@ -974,6 +1227,19 @@ def verify_llm_synthesis(
         selected_primary=selected_primary,
         expected_is_live_ready=expected_is_live_ready,
     )
+
+    if selected_primary is not None and debate_dominant_regime is not None:
+        dom_up = debate_dominant_regime.strip().upper()
+        prose_checked += 1
+        if dom_up == "CONTESTED_WAIT":
+            uncited_prose.append("debate_state:DOMINANT_REGIME_CONTESTED_WAIT_ON_SUGGESTION")
+        elif (
+            (selected_primary.direction == "BULLISH" and dom_up == "BEARISH")
+            or (selected_primary.direction == "BEARISH" and dom_up == "BULLISH")
+        ):
+            uncited_prose.append(
+                f"debate_state:DOMINANT_REGIME_CONTRADICTS_SELECTED:{dom_up}!=selected:{selected_primary.direction}"
+            )
 
     if supplied_whatsapp_digest is not None:
         dig_checked, dig_errors = validate_supplied_digest(

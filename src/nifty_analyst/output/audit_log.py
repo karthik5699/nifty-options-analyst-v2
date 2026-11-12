@@ -21,6 +21,7 @@ from typing import Any
 from nifty_analyst.output.renderer import render_analyst_report
 from nifty_analyst.scrubber import SecretScrubber
 from nifty_analyst.state import NiftyOptionsState
+from nifty_analyst.synthesis.personas import normalize_state_narrative_from_verified_facts
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ def append_immutable_audit_record(
 ) -> tuple[dict[str, Any], str]:
     """Append an immutable JSONL record of inputs and outputs (zero outcomes/P&L)."""
     scrubber = scrubber or SecretScrubber()
+    state = normalize_state_narrative_from_verified_facts(state)
     state_dict = scrubber.scrub_obj(state.to_dict())
     clean_report = scrubber.scrub_text(report_markdown)
     clean_extra = scrubber.scrub_obj(extra_audit_metadata) if extra_audit_metadata else None
@@ -97,6 +99,7 @@ def deliver_run_output(
 ) -> AuditDeliveryResult:
     """Enforce alert-only delivery policy and write immutable audit record."""
     scrubber = scrubber or SecretScrubber()
+    state = normalize_state_narrative_from_verified_facts(state)
     full_report = render_analyst_report(state, scrubber=scrubber)
     clean_wa = (
         scrubber.scrub_text(state.final_output.whatsapp_digest)

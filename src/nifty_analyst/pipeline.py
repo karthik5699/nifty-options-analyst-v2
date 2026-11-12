@@ -97,9 +97,8 @@ from nifty_analyst.synthesis.llm_node import (
 from nifty_analyst.synthesis.personas import (
     PERSONA_DEFINITIONS,
     build_compact_desk_brief,
-    build_deterministic_personas,
     build_single_pass_persona_prompt,
-    format_whatsapp_digest,
+    build_verified_report_narrative,
 )
 from nifty_analyst.synthesis.verifier import verify_llm_synthesis
 
@@ -1030,6 +1029,9 @@ def run_analyst_pipeline(
         prose_fields=prose_fields_map,
         supplied_whatsapp_digest=supplied_digest,
         expected_is_live_ready=prelim_is_live_ready,
+        debate_dominant_regime=(
+            llm_resp.debate_state.dominant_regime if llm_resp.debate_state is not None else None
+        ),
     )
 
     if (
@@ -1098,85 +1100,25 @@ def run_analyst_pipeline(
         and selected_primary.structure_id in intraday_ctx.alerted_structure_ids_today
     )
 
-    # ITEM 1: Single post-verification source of truth across prose, digest, chart, report, and audit.
-    # If verification failed, exclude all tampered LLM prose and emit clean deterministic WAIT state!
-    if not verifier_report.passed_verification:
-        clean_deb, clean_triad, clean_cons, _ = build_deterministic_personas(
-            pre_llm_state, None, []
-        )
-        deterministic_wa = format_whatsapp_digest(
-            state=pre_llm_state,
-            selected=None,
-            debate=clean_deb,
-            consolidator_conviction="SIT_OUT",
-            is_live_ready=False,
-        )
-        final_debate = clean_deb
-        final_triad = clean_triad
-        final_consolidator: ConsolidatorState | None = dataclasses.replace(
-            clean_cons,
-            recommended_structure_id="WAIT",
-            conviction="SIT_OUT",
-            final_recommendation_rationale=(
-                "Deterministic verifier rejected unverified or contradictory synthesis claims; "
-                "forced fail-closed to `WAIT` (`SIT_OUT`)."
-            ),
-            whatsapp_digest=deterministic_wa,
-        )
-        final_reasoning = (
-            f"Spot is at {contract_ctx.spot.value} (`contract_context.spot.value`). "
-            "Post-synthesis deterministic verification failed; actionable prose excluded and "
-            "verdict forced to `WAIT`."
-        )
-        final_habitual = (
-            "Excluded LLM comparison prose due to deterministic verifier rejection."
-        )
-        final_challenge = "None (verifier fail-closed `WAIT`)."
-        final_confidence = (
-            "RESEARCH-ONLY: Post-synthesis verifier failed (`WAIT`; no trade proposed)."
-        )
-        whatsapp_digest = deterministic_wa
-    else:
-        final_debate = llm_resp.debate_state
-        final_triad = llm_resp.risk_triad_state
-        final_consolidator = llm_resp.consolidator_state
-        final_reasoning = llm_resp.reasoning_summary
-        final_habitual = llm_resp.habitual_comparison_note
-        final_challenge = llm_resp.research_rule_challenge_note
-        final_confidence = llm_resp.confidence_note
-
-        if final_debate is not None:
-            conv_val: Literal["HIGH", "MODERATE", "SIT_OUT"] = (
-                final_consolidator.conviction
-                if (final_consolidator and verdict == "SUGGESTION" and final_consolidator.conviction != "SIT_OUT")
-                else ("MODERATE" if verdict == "SUGGESTION" else "SIT_OUT")
-            )
-            deterministic_wa = format_whatsapp_digest(
-                state=pre_llm_state,
-                selected=selected_primary,
-                debate=final_debate,
-                consolidator_conviction=conv_val,
-                is_live_ready=is_live_ready,
-            )
-            if final_consolidator is not None:
-                if verdict != "SUGGESTION" or selected_primary is None:
-                    final_consolidator = ConsolidatorState(
-                        recommended_structure_id="WAIT",
-                        conviction="SIT_OUT",
-                        final_recommendation_rationale=final_consolidator.final_recommendation_rationale,
-                        whatsapp_digest=deterministic_wa,
-                    )
-                else:
-                    # Always bind delivered digest & structure_id to the verified final selection
-                    final_consolidator = dataclasses.replace(
-                        final_consolidator,
-                        recommended_structure_id=selected_primary.structure_id,
-                        conviction=conv_val,
-                        whatsapp_digest=deterministic_wa,
-                    )
-            whatsapp_digest = deterministic_wa
-        else:
-            whatsapp_digest = ""
+    # ITEM 1: Generate ALL report & persona text deterministically from the final verified state
+    # across every report, state field, digest, and audit log (never copy free-form LLM prose).
+    narrative = build_verified_report_narrative(
+        state=pre_llm_state,
+        selected_primary=selected_primary,
+        eligible_candidates=eligible,
+        verdict=verdict,
+        is_live_ready=is_live_ready,
+        verifier_passed=verifier_report.passed_verification,
+        research_only_reason=research_only_reason,
+    )
+    final_debate = narrative.debate_state
+    final_triad = narrative.risk_triad_state
+    final_consolidator: ConsolidatorState | None = narrative.consolidator_state
+    final_reasoning = narrative.reasoning_summary
+    final_habitual = narrative.habitual_comparison_note
+    final_challenge = narrative.research_rule_challenge_note
+    final_confidence = narrative.confidence_note
+    whatsapp_digest = narrative.whatsapp_digest
 
     chart_path = _maybe_render_payoff_chart(selected_primary, run_id, config)
 
@@ -1226,7 +1168,11 @@ def run_analyst_pipeline(
         research_rule_challenge_note=final_challenge,
         confidence_note=final_confidence,
         staleness_report=staleness_notes,
-        llm_citations=(verified_citations if verifier_report.passed_verification else []),
+        llm_citations=(
+            verified_citations
+            if (verifier_report.passed_verification and verdict == "SUGGESTION")
+            else []
+        ),
         verifier_report=verifier_report,
         whatsapp_digest=whatsapp_digest,
         duplicate_alert_suppressed=duplicate_suppressed,

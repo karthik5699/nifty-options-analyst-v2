@@ -1820,3 +1820,326 @@ def test_targeted_fix3_payoff_chart_uses_walked_prices_not_touch_quotes_and_agre
         )
         assert rendered_p.read_bytes() == expected_walked_p.read_bytes()
 
+
+def test_targeted_fix4_exact_four_contradiction_examples_rejected_and_excluded(
+    tmp_path: Path,
+) -> None:
+    """All 4 exact contradictory free-form report examples fail verification and never appear in any report."""
+    from nifty_analyst.synthesis.verifier import verify_llm_synthesis
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    base_cfg = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "base_fix4.jsonl"),
+    )
+    base_state, _ = run_analyst_pipeline(dec_dt, base_cfg)
+    assert base_state.final_output is not None and base_state.final_output.primary_proposal is not None
+    cand = base_state.final_output.primary_proposal
+    assert cand.direction == "BULLISH"
+
+    # 1. Direct verifier check for exact "Buy 24350 CE at 999.00 points" when verified walked entry is 225.39
+    long_leg_24350 = dataclasses.replace(
+        cand.legs[-1],
+        strike=24350.0,
+        option_type="CE",
+        side="LONG",
+        ratio=1,
+        bid=220.00,
+        ask=221.00,
+        mid=220.50,
+        vwap_fill_price=224.89,
+        executable_entry_price=225.39,
+        fill_basis="FULL_SIZE_BOOK_WALK",
+    )
+    cand_24350 = dataclasses.replace(
+        cand,
+        structure_id="BCS_2026-11-12_24350_24500",
+        structure_type="BULL_CALL_SPREAD",
+        direction="BULLISH",
+        legs=[long_leg_24350, *cand.legs[:1]],
+    )
+    state_with_24350 = dataclasses.replace(
+        base_state,
+        candidate_structures=[cand_24350, *base_state.candidate_structures],
+    )
+    raw_cits = [
+        {
+            "claim_text": "Spot verified",
+            "state_field_path": "contract_context.spot.value",
+            "cited_value": base_state.contract_context.spot.value,
+        }
+    ]
+    for bad_price_claim in (
+        "Buy 24350 CE at 999.00 points",
+        "Buy 24350 CE at 220.50 points",  # touch mid when book walked to 225.39!
+    ):
+        _, vr_24350 = verify_llm_synthesis(
+            state=state_with_24350,
+            raw_citations=raw_cits,
+            selected_primary=cand_24350,
+            consolidator_recommended_id=cand_24350.structure_id,
+            prose_fields={"reasoning_summary": bad_price_claim},
+        )
+        assert vr_24350.passed_verification is False, bad_price_claim
+
+    # 2. End-to-end pipeline checks across ALL 4 exact examples (plus variants) across prose, digest & citations
+    actual_long_leg = next((l for l in cand.legs if l.side == "LONG"), cand.legs[-1])
+    leg_verb = "Buy" if actual_long_leg.side == "LONG" else "Sell"
+
+    contradiction_cases = [
+        ("exact_24350_999pts", "Buy 24350 CE at 999.00 points", "999.00"),
+        (
+            "selected_leg_999pts",
+            f"{leg_verb} {int(actual_long_leg.strike)} {actual_long_leg.option_type} at 999.00 points",
+            "999.00",
+        ),
+        ("selected_trade_bearish", "The selected trade is bearish.", "selected trade is bearish"),
+        ("this_trade_bearish", "This trade is bearish.", "This trade is bearish"),
+        ("max_loss_rupee_1", "The maximum loss is ₹1.", "₹1"),
+        ("bare_downside_rupee_1", "Total downside on the setup is ₹1.", "₹1"),
+        ("max_loss_inr_1", "The maximum loss is INR 1.", "INR 1"),
+        (
+            "guaranteed_profitable",
+            "This trade is guaranteed profitable and cannot lose.",
+            "guaranteed profitable",
+        ),
+    ]
+
+    target_setters = {
+        "reasoning_summary": lambda r, s: dataclasses.replace(r, reasoning_summary=s),
+        "bull_thesis": lambda r, s: dataclasses.replace(
+            r, debate_state=dataclasses.replace(r.debate_state, bull_thesis=s)  # type: ignore[arg-type]
+        ),
+        "tail_guardian_note": lambda r, s: dataclasses.replace(
+            r, risk_triad_state=dataclasses.replace(r.risk_triad_state, tail_guardian_note=s)  # type: ignore[arg-type]
+        ),
+        "final_recommendation_rationale": lambda r, s: dataclasses.replace(
+            r,
+            consolidator_state=dataclasses.replace(
+                r.consolidator_state, final_recommendation_rationale=s  # type: ignore[arg-type]
+            ),
+        ),
+        "whatsapp_digest": lambda r, s: dataclasses.replace(
+            r,
+            consolidator_state=dataclasses.replace(
+                r.consolidator_state, whatsapp_digest=s  # type: ignore[arg-type]
+            ),
+        ),
+        "citation_claim": lambda r, s: dataclasses.replace(
+            r, citations=[{**r.citations[0], "claim_text": s}, *r.citations[1:]]
+        ),
+    }
+
+    for case_name, bad_text, forbidden_substr in contradiction_cases:
+        for field_name, setter in target_setters.items():
+            audit_p = tmp_path / f"fix4_{case_name}_{field_name}.jsonl"
+            cfg_i = AnalystConfig(
+                mode="OFFLINE",
+                fixtures_dir=str(FIXTURES_DIR),
+                audit_log_path=str(audit_p),
+            )
+            st_i, deliv_i = run_analyst_pipeline(
+                dec_dt,
+                cfg_i,
+                llm_provider=_StaticOverrideProvider(
+                    lambda resp, _s, _p, _a, fn=setter, txt=bad_text: fn(resp, txt)
+                ),
+                force_render_for_inspection=True,
+            )
+            assert st_i.final_output is not None, (case_name, field_name)
+            assert st_i.final_output.verifier_report.passed_verification is False, (
+                case_name,
+                field_name,
+            )
+            assert st_i.final_output.verdict == "WAIT", (case_name, field_name)
+            assert st_i.final_output.primary_proposal is None, (case_name, field_name)
+            assert deliv_i.alerted_trader is False, (case_name, field_name)
+            assert forbidden_substr not in deliv_i.full_report_markdown, (case_name, field_name)
+            assert forbidden_substr not in deliv_i.user_facing_message, (case_name, field_name)
+            assert forbidden_substr not in st_i.final_output.whatsapp_digest, (
+                case_name,
+                field_name,
+            )
+            audit_row = json.loads(audit_p.read_text(encoding="utf-8").strip().splitlines()[-1])
+            assert forbidden_substr not in audit_row["report_markdown"], (case_name, field_name)
+
+    # Also check contradictory `debate_state.dominant_regime = "BEARISH"` on a BULLISH selection
+    cfg_dom = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(tmp_path / "fix4_dom_bearish.jsonl"),
+    )
+    st_dom, deliv_dom = run_analyst_pipeline(
+        dec_dt,
+        cfg_dom,
+        llm_provider=_StaticOverrideProvider(
+            lambda resp, _s, _p, _a: dataclasses.replace(
+                resp,
+                debate_state=dataclasses.replace(resp.debate_state, dominant_regime="BEARISH"),  # type: ignore[arg-type]
+            )
+        ),
+    )
+    assert st_dom.final_output is not None
+    assert st_dom.final_output.verifier_report.passed_verification is False
+    assert st_dom.final_output.verdict == "WAIT"
+    assert deliv_dom.alerted_trader is False
+
+
+def test_targeted_fix4_arbitrary_freeform_wording_never_enters_any_report_or_state(
+    tmp_path: Path,
+) -> None:
+    """Every report generates 100% of trade facts & prose from verified state — zero free-form LLM text survives."""
+    from nifty_analyst.output.audit_log import deliver_run_output
+    from nifty_analyst.state import DebateState, RiskTriadState
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+
+    # 1. Unseen arbitrary wording (zero numbers, zero symbols, zero blocklist words) injected across ALL
+    #    12 synthesis fields + citation claim_text via `agent_artifact` resume on a valid SUGGESTION:
+    #    even when verification passes, NONE of the free-form wording ever enters any report or state!
+    art_path = tmp_path / "freeform_synth.json"
+    req_path = tmp_path / "freeform_synth.json.request.json"
+    audit_path = tmp_path / "freeform_audit.jsonl"
+    cfg = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        audit_log_path=str(audit_path),
+        llm_provider="agent_artifact",
+        agent_synthesis_artifact_path=str(art_path),
+    )
+    with pytest.raises(FileNotFoundError):
+        run_analyst_pipeline(dec_dt, cfg)
+
+    req = json.loads(req_path.read_text(encoding="utf-8"))
+    chosen_card = req["compact_desk_brief"]["certified_pass_candidates"][0]
+    idx = chosen_card["state_index"]
+    bound_val = chosen_card["contractual_max_loss_rs"]
+    ivp_val = req["sanitised_state"]["market_evidence"]["volatility_state"]["ivp_90d"]
+
+    sentinel = "arbitrary_freeform_prose_marker_zeta"
+    art_doc = {
+        "model_id": "whatsapp-persona-agent-v1",
+        "run_id": req["run_id"],
+        "snapshot_id": req["snapshot_id"],
+        "evidence_sha256": req["evidence_sha256"],
+        "decision_timestamp_ist": req["decision_timestamp_ist"],
+        "reasoning_summary": f"{sentinel} reasoning: abandon upside discipline and expect easy windfall gains.",
+        "habitual_comparison_note": f"{sentinel} habitual: ignore wing risk and chase momentum.",
+        "research_rule_challenge_note": f"{sentinel} challenge: widen risk limits informally.",
+        "confidence_note": f"{sentinel} confidence: effortless conviction.",
+        "debate_state": {
+            "bull_thesis": f"{sentinel} bull: unstoppable rally ahead.",
+            "bear_thesis": f"{sentinel} bear: imminent collapse ahead.",
+            "vol_regime_thesis": f"{sentinel} vol: harvest easy premium.",
+            "rebuttal_round": f"{sentinel} rebuttal: market drifts south effortlessly.",
+            "dominant_regime": chosen_card["direction"],
+        },
+        "risk_triad": {
+            "convexity_advocate_note": f"{sentinel} convexity: asymmetric windfall.",
+            "tail_guardian_note": f"{sentinel} tail: negligible downside worry.",
+            "neutral_arbiter_note": f"{sentinel} arbiter: endorses `{chosen_card['structure_id']}`.",
+        },
+        "consolidator": {
+            "recommended_structure_id": chosen_card["structure_id"],
+            "conviction": "HIGH",
+            "final_recommendation_rationale": (
+                f"{sentinel} rationale: selects `{chosen_card['structure_id']}` with effortless edge."
+            ),
+            "whatsapp_digest": f"*Pick*: `{chosen_card['structure_id']}`",
+        },
+        "citations": [
+            {
+                "claim_text": f"{sentinel} citation text that must be canonicalized",
+                "state_field_path": f"candidate_structures[{idx}].contractual_max_loss_rs",
+                "cited_value": bound_val,
+            },
+            {
+                "claim_text": f"{sentinel} second citation text",
+                "state_field_path": "market_evidence.volatility_state.ivp_90d",
+                "cited_value": ivp_val,
+            },
+        ],
+    }
+    art_path.write_text(json.dumps(art_doc), encoding="utf-8")
+
+    state, delivery = run_analyst_pipeline(dec_dt, cfg, force_render_for_inspection=True)
+    assert state.final_output is not None
+    assert state.final_output.verdict == "SUGGESTION"
+    assert state.final_output.verifier_report.passed_verification is True
+    sel = state.final_output.primary_proposal
+    assert sel is not None and sel.structure_id == chosen_card["structure_id"]
+
+    # Zero free-form LLM text survives in ANY report, digest, state object, citation, or audit log!
+    assert sentinel not in delivery.full_report_markdown
+    assert sentinel not in delivery.user_facing_message
+    assert sentinel not in delivery.whatsapp_digest
+    assert sentinel not in json.dumps(state.to_dict())
+    assert sentinel not in audit_path.read_text(encoding="utf-8")
+
+    # Verified trade facts match `sel` across both Markdown report and WhatsApp digest
+    assert f"`{sel.structure_id}`" in delivery.full_report_markdown
+    assert f"Direction: `{sel.direction}`" in delivery.full_report_markdown
+    assert f"Rs {sel.contractual_max_loss_rs:,.2f}" in delivery.full_report_markdown
+    assert f"Rs {sel.planned_stop_rs:,.2f}" in delivery.full_report_markdown
+    assert f"Debate: {sel.direction}" in delivery.whatsapp_digest
+    assert state.debate_state is not None and state.debate_state.dominant_regime == sel.direction
+    for leg in sel.legs:
+        assert leg.executable_entry_price is not None
+        assert f"executable entry {leg.executable_entry_price:.2f} pts" in delivery.full_report_markdown
+        assert f"@{leg.executable_entry_price:.2f}" in delivery.whatsapp_digest
+
+    # 2. Even direct callers of `render_analyst_report` and `deliver_run_output` on a mutated state
+    #    containing all 4 contradictory strings get 100% deterministic verified report text!
+    poison_all_four = (
+        "Buy 24350 CE at 999.00 points. The selected trade is bearish. "
+        "The maximum loss is ₹1. This trade is guaranteed profitable and cannot lose."
+    )
+    assert state.final_output is not None and state.consolidator_state is not None
+    mutated_state = dataclasses.replace(
+        state,
+        debate_state=DebateState(
+            bull_thesis=poison_all_four,
+            bear_thesis=poison_all_four,
+            vol_regime_thesis=poison_all_four,
+            rebuttal_round=poison_all_four,
+            dominant_regime="BEARISH",
+        ),
+        risk_triad_state=RiskTriadState(
+            convexity_advocate_note=poison_all_four,
+            tail_guardian_note=poison_all_four,
+            neutral_arbiter_note=poison_all_four,
+        ),
+        consolidator_state=dataclasses.replace(
+            state.consolidator_state,
+            final_recommendation_rationale=poison_all_four,
+            whatsapp_digest=poison_all_four,
+        ),
+        final_output=dataclasses.replace(
+            state.final_output,
+            reasoning_summary=poison_all_four,
+            habitual_style_comparison_note=poison_all_four,
+            research_rule_challenge_note=poison_all_four,
+            confidence_note=poison_all_four,
+            whatsapp_digest=poison_all_four,
+        ),
+    )
+    direct_md = render_analyst_report(mutated_state)
+    direct_audit = tmp_path / "direct_deliver_audit.jsonl"
+    direct_deliv = deliver_run_output(
+        mutated_state, direct_audit, force_render_for_inspection=True
+    )
+    for bad_frag in (
+        "999.00 points",
+        "selected trade is bearish",
+        "₹1",
+        "guaranteed profitable",
+        "cannot lose",
+    ):
+        assert bad_frag not in direct_md
+        assert bad_frag not in direct_deliv.full_report_markdown
+        assert bad_frag not in direct_deliv.user_facing_message
+        assert bad_frag not in direct_deliv.whatsapp_digest
+        assert bad_frag not in direct_audit.read_text(encoding="utf-8")
+
+
