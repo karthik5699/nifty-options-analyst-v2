@@ -13,9 +13,12 @@ Orchestrates:
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import dataclass
 import datetime as dt
 import hashlib
+import inspect
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
@@ -33,6 +36,7 @@ from nifty_analyst.adapters.kotak_neo import (
     FixtureKotakNeoAdapter,
     KotakAdapterError,
     KotakNeoReadOnlyPort,
+    KotakRateLimit429Error,
     LiveKotakNeoAdapter,
     ProvisionalSerialRateLimiter,
     parse_and_validate_option_chain,
@@ -160,6 +164,275 @@ def _rank_candidate(
             score += 4.0
 
     return round(score, 4)
+
+
+_UNVERIFIED_QUOTE_TS_TAGS: tuple[str, ...] = (
+    "FETCH_TIME_NOT_EXCHANGE",
+    "UNVERIFIED_KOTAK_REST_LSTUP_TIME",
+    "UNVERIFIED_CANDIDATE_FIELD",
+)
+
+_COVERAGE_BUCKET_KEYS: tuple[str, ...] = (
+    "listed",
+    "selected",
+    "requested",
+    "returned",
+    "missing",
+    "rejected",
+    "priced",
+)
+
+
+@dataclass(frozen=True)
+class BoundedExpiryPlan:
+    """Bounded automatic expiry & per-expiry depth-token budget selection."""
+
+    anchor_expiry: ExpiryMetadata
+    required_expiries: tuple[ExpiryMetadata, ...]
+    selected_expiries: tuple[ExpiryMetadata, ...]
+    unlisted_required_expiries: tuple[str, ...]
+    token_budget_by_expiry: dict[str, int]
+    remaining_request_budget: int
+    single_expiry_budget_limited: bool
+
+
+def select_bounded_expiries_and_budgets(
+    active_expiries: Sequence[ExpiryMetadata],
+    open_positions: Sequence[OpenPosition],
+    config: AnalystConfig,
+    broker_adapter: Any,
+    target_expiry_override: str | None = None,
+) -> BoundedExpiryPlan:
+    """Deterministically select required expiries and depth-token budgets within the pacing cap.
+
+    Never evaluates all listed expiries blindly in `LIVE_MORNING_SNAPSHOT` mode:
+    1. Anchor expiry (`dte_trading_sessions >= 2` preferred, or `target_expiry_override`).
+    2. Any active expiry carrying monitored `open_positions` (`pos.expiry_date`, or
+       `pos.dte_trading_sessions` fallback when `pos.neo_symbols` is non-empty).
+    3. Next active comparison expiry (`dte_trading_sessions >= 1`, `!= anchor`) when
+       `evaluate_all_active_expiries` is enabled so multi-expiry surface / CM30 can be evaluated.
+    """
+    active_list = list(active_expiries)
+    active_by_date = {e.expiry_date: e for e in active_list}
+    anchor_expiry = active_list[0]
+
+    if target_expiry_override:
+        if target_expiry_override in active_by_date:
+            anchor_expiry = active_by_date[target_expiry_override]
+            unlisted_override: tuple[str, ...] = ()
+        else:
+            unlisted_override = (target_expiry_override,)
+        return BoundedExpiryPlan(
+            anchor_expiry=anchor_expiry,
+            required_expiries=(anchor_expiry,),
+            selected_expiries=(anchor_expiry,),
+            unlisted_required_expiries=unlisted_override,
+            token_budget_by_expiry={},
+            remaining_request_budget=999,
+            single_expiry_budget_limited=False,
+        )
+
+    for exp in active_list:
+        if exp.dte_trading_sessions >= 2:
+            anchor_expiry = exp
+            break
+
+    unlisted_req: list[str] = []
+    monitored_exps: list[ExpiryMetadata] = []
+    monitored_seen: set[str] = set()
+    held_count_by_exp: dict[str, int] = {}
+
+    for pos in open_positions:
+        exp_str = (pos.expiry_date or "").strip()
+        n_syms = len([ns for ns in pos.neo_symbols if ns])
+        if exp_str:
+            if exp_str in active_by_date:
+                exp_m = active_by_date[exp_str]
+                held_count_by_exp[exp_str] = held_count_by_exp.get(exp_str, 0) + n_syms
+                if exp_str not in monitored_seen:
+                    monitored_seen.add(exp_str)
+                    monitored_exps.append(exp_m)
+            elif exp_str not in unlisted_req:
+                unlisted_req.append(exp_str)
+        elif n_syms > 0 and pos.dte_trading_sessions > 0:
+            matched_dte = next(
+                (e for e in active_list if e.dte_trading_sessions == pos.dte_trading_sessions),
+                None,
+            )
+            if matched_dte is not None:
+                held_count_by_exp[matched_dte.expiry_date] = (
+                    held_count_by_exp.get(matched_dte.expiry_date, 0) + n_syms
+                )
+                if matched_dte.expiry_date not in monitored_seen:
+                    monitored_seen.add(matched_dte.expiry_date)
+                    monitored_exps.append(matched_dte)
+
+    if config.mode != "LIVE_MORNING_SNAPSHOT":
+        if config.evaluate_all_active_expiries:
+            base_exps = [e for e in active_list if e.dte_trading_sessions >= 1] or [anchor_expiry]
+        else:
+            base_exps = [anchor_expiry]
+        ordered_off = [anchor_expiry] + [
+            e for e in base_exps if e.expiry_date != anchor_expiry.expiry_date
+        ]
+        seen_off = {e.expiry_date for e in ordered_off}
+        for m_exp in monitored_exps:
+            if m_exp.expiry_date not in seen_off:
+                ordered_off.append(m_exp)
+                seen_off.add(m_exp.expiry_date)
+        return BoundedExpiryPlan(
+            anchor_expiry=anchor_expiry,
+            required_expiries=tuple(ordered_off),
+            selected_expiries=tuple(ordered_off),
+            unlisted_required_expiries=tuple(unlisted_req),
+            token_budget_by_expiry={},
+            remaining_request_budget=999,
+            single_expiry_budget_limited=False,
+        )
+
+    # LIVE_MORNING_SNAPSHOT bounded expiry selection
+    req_list: list[ExpiryMetadata] = [anchor_expiry]
+    req_dates: set[str] = {anchor_expiry.expiry_date}
+    for m_exp in monitored_exps:
+        if m_exp.expiry_date not in req_dates:
+            req_list.append(m_exp)
+            req_dates.add(m_exp.expiry_date)
+
+    optional_list: list[ExpiryMetadata] = []
+    if config.evaluate_all_active_expiries:
+        next_comp = next(
+            (
+                e
+                for e in active_list
+                if e.dte_trading_sessions >= 1 and e.expiry_date != anchor_expiry.expiry_date
+            ),
+            None,
+        )
+        if next_comp is not None and next_comp.expiry_date not in req_dates:
+            if len(req_list) < 2:
+                req_list.append(next_comp)
+                req_dates.add(next_comp.expiry_date)
+            else:
+                optional_list.append(next_comp)
+
+    limiter = getattr(broker_adapter, "rate_limiter", None)
+    has_live_paced_cap = (
+        isinstance(limiter, PacedReadTransport)
+        and limiter.min_interval_seconds > 0.0
+        and limiter.max_queue_wait_seconds > 0.0
+    )
+    if has_live_paced_cap:
+        eff_interval = limiter.min_interval_seconds + getattr(limiter, "strict_guard_seconds", 0.0)
+        if limiter.request_count == 0 and getattr(limiter, "_last_request_ts", None) is None:
+            rem_requests = 1 + int(
+                math.floor((limiter.max_queue_wait_seconds + 1e-9) / eff_interval)
+            )
+        else:
+            rem_wait = max(0.0, limiter.max_queue_wait_seconds - limiter.cumulative_wait_seconds)
+            rem_requests = int(math.floor((rem_wait + 1e-9) / eff_interval))
+    elif (
+        config.kotak_min_request_interval_seconds > 0.0
+        and config.kotak_max_queue_wait_seconds > 0.0
+    ):
+        total_cold_slots = 1 + int(
+            math.floor(
+                (config.kotak_max_queue_wait_seconds + 1e-9)
+                / config.kotak_min_request_interval_seconds
+            )
+        )
+        rem_requests = max(1, total_cold_slots - 7)
+    else:
+        rem_requests = 999
+
+    batch_size = max(
+        1,
+        min(
+            50,
+            int(getattr(broker_adapter, "quotes_batch_size", 0) or config.kotak_quotes_batch_size),
+        ),
+    )
+    default_max_tokens = max(
+        6,
+        int(
+            getattr(broker_adapter, "max_depth_tokens_per_expiry", 0)
+            or config.kotak_max_depth_tokens_per_expiry
+        ),
+    )
+
+    def _min_tok_for(exp_m: ExpiryMetadata, is_anchor_exp: bool) -> int:
+        held_n = held_count_by_exp.get(exp_m.expiry_date, 0)
+        parity_plus_held = max(6, held_n + 6)
+        if is_anchor_exp:
+            # Keep directional wings on the primary anchor chain (>= 12 or default_max_tokens)
+            return max(parity_plus_held, min(default_max_tokens, 12))
+        return parity_plus_held
+
+    def _pref_tok_for(exp_m: ExpiryMetadata, is_anchor_exp: bool) -> int:
+        if is_anchor_exp:
+            return max(default_max_tokens, _min_tok_for(exp_m, True))
+        return max(_min_tok_for(exp_m, False), min(default_max_tokens, 8))
+
+    def _calls_for(num_tokens: int) -> int:
+        return 1 + int(math.ceil(num_tokens / float(batch_size)))
+
+    token_budgets: dict[str, int] = {}
+    selected: list[ExpiryMetadata] = []
+    single_budget_limited = False
+
+    pref_costs = [_calls_for(_pref_tok_for(e, i == 0)) for i, e in enumerate(req_list)]
+    min_costs = [_calls_for(_min_tok_for(e, i == 0)) for i, e in enumerate(req_list)]
+
+    if sum(pref_costs) <= rem_requests:
+        selected = list(req_list)
+        for i, e in enumerate(req_list):
+            token_budgets[e.expiry_date] = _pref_tok_for(e, i == 0)
+        used_calls = sum(pref_costs)
+    elif sum(min_costs) <= rem_requests:
+        selected = list(req_list)
+        for i, e in enumerate(req_list):
+            token_budgets[e.expiry_date] = _min_tok_for(e, i == 0)
+        used_calls = sum(min_costs)
+    else:
+        # Cannot fit all required expiries simultaneously; fit greedily in priority order
+        if len(req_list) >= 2 and (min_costs[0] + min_costs[1]) > rem_requests:
+            # Even 2 expiries cannot fit -> single-expiry budget degradation (e.g. batch_size <= 2)
+            selected = [anchor_expiry]
+            single_budget_limited = True
+            if has_live_paced_cap:
+                max_fit_tok = max(6, (max(2, rem_requests) - 1) * batch_size)
+                token_budgets[anchor_expiry.expiry_date] = min(default_max_tokens, max_fit_tok)
+            else:
+                token_budgets[anchor_expiry.expiry_date] = default_max_tokens
+            used_calls = _calls_for(token_budgets[anchor_expiry.expiry_date])
+        else:
+            used_calls = 0
+            for i, e in enumerate(req_list):
+                tok_i = _min_tok_for(e, i == 0)
+                c_i = _calls_for(tok_i)
+                if i == 0 or (used_calls + c_i) <= rem_requests:
+                    selected.append(e)
+                    token_budgets[e.expiry_date] = tok_i
+                    used_calls += c_i
+
+    # Include optional comparison expiry when all required expiries fitted with spare budget
+    if len(selected) == len(req_list) and optional_list:
+        for e_opt in optional_list:
+            tok_opt = _pref_tok_for(e_opt, False)
+            c_opt = _calls_for(tok_opt)
+            if (used_calls + c_opt) <= rem_requests:
+                selected.append(e_opt)
+                token_budgets[e_opt.expiry_date] = tok_opt
+                used_calls += c_opt
+
+    return BoundedExpiryPlan(
+        anchor_expiry=anchor_expiry,
+        required_expiries=tuple(req_list),
+        selected_expiries=tuple(selected),
+        unlisted_required_expiries=tuple(unlisted_req),
+        token_budget_by_expiry=token_budgets,
+        remaining_request_budget=rem_requests,
+        single_expiry_budget_limited=single_budget_limited,
+    )
 
 
 def _create_insufficient_data_state(
@@ -366,7 +639,7 @@ def run_analyst_pipeline(
         )
         evaluated_chains_count = max(1, len(chain_provenance))
         any_fetch_time_unverified = any(
-            "FETCH_TIME_NOT_EXCHANGE" in str(c.get("source_verification_tag", ""))
+            any(tok in str(c.get("source_verification_tag", "")) for tok in _UNVERIFIED_QUOTE_TS_TAGS)
             for c in chain_provenance
         )
         intraday_ctx = load_same_day_intraday_context(
@@ -422,10 +695,16 @@ def run_analyst_pipeline(
                         if config.cache_dir
                         else None
                     )
+                    pacing_state_path = (
+                        Path(config.cache_dir) / "kotak_pacing_state.json"
+                        if config.cache_dir
+                        else None
+                    )
                     live_limiter = PacedReadTransport(
                         min_interval_seconds=config.kotak_min_request_interval_seconds,
                         max_queue_wait_seconds=config.kotak_max_queue_wait_seconds,
                         cooldown_file_path=cooldown_path,
+                        pacing_state_file_path=pacing_state_path,
                     )
                     trading_cal = {
                         "holiday_dates": frozenset(d.isoformat() for d in holidays),
@@ -442,6 +721,11 @@ def run_analyst_pipeline(
                         cache_dir=config.cache_dir or None,
                         trading_calendar=trading_cal,  # type: ignore[arg-type]
                     )
+            elif held_neo_symbols and hasattr(broker_adapter, "extra_neo_symbols"):
+                existing_extra = list(getattr(broker_adapter, "extra_neo_symbols") or ())
+                broker_adapter.extra_neo_symbols = tuple(  # type: ignore[attr-defined]
+                    dict.fromkeys([*existing_extra, *held_neo_symbols])
+                )
 
             raw_master = broker_adapter.fetch_contract_master_raw(dec_ist)
             expected_cal_expiries = raw_master.get("expected_calendar_expiries")
@@ -491,40 +775,11 @@ def run_analyst_pipeline(
             )
             return state, delivery
 
-        # Select anchor expiry (prefer nearest expiry with DTE >= 2 sessions unless overridden)
-        anchor_expiry_meta = contract_ctx.active_expiries[0]
-        if target_expiry_override:
-            for exp in contract_ctx.active_expiries:
-                if exp.expiry_date == target_expiry_override:
-                    anchor_expiry_meta = exp
-                    break
-            expiries_to_evaluate = [anchor_expiry_meta]
-        else:
-            for exp in contract_ctx.active_expiries:
-                if exp.dte_trading_sessions >= 2:
-                    anchor_expiry_meta = exp
-                    break
-            # In live mode with small verified quotes batch size (<= 5 tokens/call), evaluate only
-            # the anchor expiry so total serial requests stay strictly within the 35s queue cap.
-            # NOTE (Item 5): This path is truthfully tagged SINGLE_EXPIRY_DEGRADED (not multi-expiry surface).
-            live_budget_constrained = (
-                config.mode == "LIVE_MORNING_SNAPSHOT" and config.kotak_quotes_batch_size <= 5
-            )
-            if config.evaluate_all_active_expiries and not live_budget_constrained:
-                expiries_to_evaluate = [
-                    exp for exp in contract_ctx.active_expiries if exp.dte_trading_sessions >= 1
-                ] or [anchor_expiry_meta]
-            else:
-                expiries_to_evaluate = [anchor_expiry_meta]
-
-        expiries_ordered = [anchor_expiry_meta] + [
-            e for e in expiries_to_evaluate if e.expiry_date != anchor_expiry_meta.expiry_date
-        ]
-
         evaluated_chains: list[
             tuple[ExpiryMetadata, ChainSnapshotEnvelope, ChainQAResult, float, float]
         ] = []
         all_rejected_books = []
+        per_expiry_coverage: dict[str, dict[str, Any]] = {}
         live_expiry_lots: dict[str, int] = {}
         spot_val = contract_ctx.spot.value
 
@@ -535,20 +790,55 @@ def run_analyst_pipeline(
             )
             vix_datum = broker_adapter.fetch_india_vix_raw(dec_ist)
 
+            expiry_plan = select_bounded_expiries_and_budgets(
+                active_expiries=contract_ctx.active_expiries,
+                open_positions=portfolio_state.open_positions,
+                config=config,
+                broker_adapter=broker_adapter,
+                target_expiry_override=target_expiry_override,
+            )
+            expiries_ordered = list(expiry_plan.selected_expiries)
+            fetch_chain_params = inspect.signature(
+                broker_adapter.fetch_option_chain_raw
+            ).parameters
+            supports_token_override = "max_depth_tokens_override" in fetch_chain_params
+
             for idx_exp, exp_meta in enumerate(expiries_ordered):
                 is_anchor = idx_exp == 0
+                tok_override = expiry_plan.token_budget_by_expiry.get(exp_meta.expiry_date)
                 try:
-                    raw_chain = broker_adapter.fetch_option_chain_raw(exp_meta.expiry_date, dec_ist)
+                    if supports_token_override and tok_override is not None:
+                        raw_chain = broker_adapter.fetch_option_chain_raw(  # type: ignore[call-arg]
+                            exp_meta.expiry_date,
+                            dec_ist,
+                            max_depth_tokens_override=tok_override,
+                        )
+                    else:
+                        raw_chain = broker_adapter.fetch_option_chain_raw(
+                            exp_meta.expiry_date, dec_ist
+                        )
                     chain_env = parse_and_validate_option_chain(
                         raw_chain=raw_chain,
                         expiry_date=exp_meta.expiry_date,
                         decision_dt_ist=dec_ist,
                         max_staleness_seconds=config.max_quote_staleness_seconds,
                     )
-                except KotakAdapterError:
+                except KotakRateLimit429Error:
+                    # HTTP 429 MUST hard-stop the entire run immediately with zero retry/probing
+                    raise
+                except KotakAdapterError as exc:
+                    per_expiry_coverage[exp_meta.expiry_date] = {
+                        "expiry_date": exp_meta.expiry_date,
+                        "status": f"FETCH_FAILED:{exc}",
+                        **{k: [] for k in _COVERAGE_BUCKET_KEYS},
+                        "counts": {k: 0 for k in _COVERAGE_BUCKET_KEYS},
+                    }
                     if is_anchor:
                         raise
                     continue
+
+                if chain_env.coverage_ledger:
+                    per_expiry_coverage[exp_meta.expiry_date] = dict(chain_env.coverage_ledger)
 
                 if chain_env.rejected_depth_books:
                     all_rejected_books.extend(chain_env.rejected_depth_books)
@@ -558,6 +848,8 @@ def run_analyst_pipeline(
                         exp_meta = dataclasses.replace(exp_meta, lot_size=chain_env.lot_size)
 
                 if chain_env.any_stale:
+                    if exp_meta.expiry_date in per_expiry_coverage:
+                        per_expiry_coverage[exp_meta.expiry_date]["status"] = "STALE_QUOTES_HALT"
                     if is_anchor:
                         state = _create_insufficient_data_state(
                             run_id=run_id,
@@ -591,8 +883,13 @@ def run_analyst_pipeline(
                     quotes=chain_env.quotes,
                     time_to_expiry_years=t_yrs,
                     risk_free_rate=config.risk_free_rate_annual,
+                    max_leg_timestamp_skew_seconds=config.max_leg_timestamp_skew_seconds,
                 )
                 if not qa_res.passed:
+                    if exp_meta.expiry_date in per_expiry_coverage:
+                        per_expiry_coverage[exp_meta.expiry_date]["status"] = (
+                            f"CHAIN_QA_FAILED:{qa_res.failure_code}"
+                        )
                     if is_anchor:
                         state = _create_insufficient_data_state(
                             run_id=run_id,
@@ -617,6 +914,8 @@ def run_analyst_pipeline(
                         return state, delivery
                     continue
 
+                if exp_meta.expiry_date in per_expiry_coverage:
+                    per_expiry_coverage[exp_meta.expiry_date]["status"] = "PRICED"
                 exp_atm_iv = round(0.5 * (qa_res.atm_call_iv + qa_res.atm_put_iv), 6)
                 evaluated_chains.append((exp_meta, chain_env, qa_res, t_yrs, exp_atm_iv))
 
@@ -654,30 +953,128 @@ def run_analyst_pipeline(
                 lot_size_change_detected=len({e.lot_size for e in updated_active}) > 1,
             )
 
-        # Item 5: Truthful surface coverage & held-contract coverage tracking
-        surface_coverage_status: Literal["MULTI_EXPIRY_FULL", "SINGLE_EXPIRY_DEGRADED"] = (
-            "SINGLE_EXPIRY_DEGRADED"
-            if (len(contract_ctx.active_expiries) > 1 and len(evaluated_chains) == 1)
-            else "MULTI_EXPIRY_FULL"
+        # Item 3 & 5: Explicit 7-bucket coverage ledger & truthful surface-comparison certification
+        priced_expiry_dates = [m.expiry_date for (m, _, _, _, _) in evaluated_chains]
+        priced_expiry_set = set(priced_expiry_dates)
+        required_expiry_dates = list(
+            dict.fromkeys(
+                [e.expiry_date for e in expiry_plan.required_expiries]
+                + list(expiry_plan.unlisted_required_expiries)
+            )
         )
+        missing_required_expiries = [
+            d for d in required_expiry_dates if d not in priced_expiry_set
+        ]
         covered_priced_neos = {
             ns for (_, env, _, _, _) in evaluated_chains for ns in env.priced_neo_symbols
         }
         uncovered_held_neos = sorted(
             {ns for ns in held_neo_symbols if ns and ns not in covered_priced_neos}
         )
+        any_missing_requested_quotes = any(
+            bool(env.coverage_ledger.get("missing")) for (_, env, _, _, _) in evaluated_chains
+        )
+
+        totals_counts: dict[str, int] = {k: 0 for k in _COVERAGE_BUCKET_KEYS}
+        for cov_entry in per_expiry_coverage.values():
+            c_map = cov_entry.get("counts") or {}
+            for k in _COVERAGE_BUCKET_KEYS:
+                totals_counts[k] += int(c_map.get(k, 0) or 0)
+
+        run_coverage_ledger: dict[str, Any] = {
+            "listed_expiries": [e.expiry_date for e in contract_ctx.active_expiries],
+            "required_expiries": required_expiry_dates,
+            "selected_expiries": [e.expiry_date for e in expiry_plan.selected_expiries],
+            "priced_expiries": priced_expiry_dates,
+            "unlisted_required_expiries": list(expiry_plan.unlisted_required_expiries),
+            "missing_required_expiries": missing_required_expiries,
+            "required_monitored_contracts": sorted({ns for ns in held_neo_symbols if ns}),
+            "priced_monitored_contracts": sorted(
+                {ns for ns in held_neo_symbols if ns and ns in covered_priced_neos}
+            ),
+            "uncovered_monitored_contracts": uncovered_held_neos,
+            "by_expiry": per_expiry_coverage,
+            "totals": totals_counts,
+            "transport_counts": {
+                "adapter_call_count": int(getattr(broker_adapter, "adapter_call_count", 0) or 0),
+                "cache_hit_count": int(getattr(broker_adapter, "cache_hit_count", 0) or 0),
+                "http_request_count": int(getattr(broker_adapter, "http_request_count", 0) or 0),
+            },
+        }
+
+        surface_coverage_status: Literal[
+            "MULTI_EXPIRY_FULL", "SINGLE_EXPIRY_DEGRADED", "INCOMPLETE_SURFACE_COVERAGE"
+        ]
+        if (
+            expiry_plan.single_expiry_budget_limited
+            and len(contract_ctx.active_expiries) > 1
+            and len(evaluated_chains) == 1
+        ):
+            surface_coverage_status = "SINGLE_EXPIRY_DEGRADED"
+            surface_coverage_detail = (
+                f"Evaluated anchor expiry {evaluated_chains[0][0].expiry_date} only out of "
+                f"{len(contract_ctx.active_expiries)} listed expiries under small-batch request budget; "
+                "multi-expiry surface comparison is NOT certified."
+            )
+        elif (
+            missing_required_expiries
+            or uncovered_held_neos
+            or any_missing_requested_quotes
+            or (
+                config.evaluate_all_active_expiries
+                and not target_expiry_override
+                and len(contract_ctx.active_expiries) > 1
+                and len(evaluated_chains) < 2
+            )
+        ):
+            surface_coverage_status = "INCOMPLETE_SURFACE_COVERAGE"
+            inc_parts: list[str] = []
+            if missing_required_expiries:
+                inc_parts.append(f"unpriced_required_expiries={missing_required_expiries}")
+            if uncovered_held_neos:
+                inc_parts.append(f"unpriced_required_contracts={uncovered_held_neos}")
+            if any_missing_requested_quotes:
+                missing_syms = sorted(
+                    {
+                        ns
+                        for (_, env, _, _, _) in evaluated_chains
+                        for ns in (env.coverage_ledger.get("missing") or [])
+                    }
+                )
+                inc_parts.append(f"missing_requested_quotes={missing_syms}")
+            if not inc_parts:
+                inc_parts.append(
+                    f"priced_expiries={len(evaluated_chains)}/{len(contract_ctx.active_expiries)}"
+                )
+            surface_coverage_detail = (
+                "INCOMPLETE_SURFACE_COVERAGE (" + "; ".join(inc_parts) + "); "
+                "multi-expiry surface comparison is NOT certified."
+            )
+        else:
+            surface_coverage_status = "MULTI_EXPIRY_FULL"
+            surface_coverage_detail = (
+                f"Priced {len(evaluated_chains)} expiry(s) {priced_expiry_dates} "
+                f"(listed={len(contract_ctx.active_expiries)})."
+            )
 
         anchor_meta, anchor_chain_env, anchor_qa, anchor_t_yrs, anchor_atm_iv = evaluated_chains[0]
         atm_iv_by_expiry = {m.expiry_date: iv for (m, _, _, _, iv) in evaluated_chains}
-        t_and_ivs = [(t_y, iv) for (_, _, _, t_y, iv) in evaluated_chains]
-        cm30_iv, ts_slope, ts_regime = compute_variance_interpolated_cm30_iv(
-            t_and_ivs, target_days=30.0
-        )
-        iv_source_lbl = (
-            "LIVE_VARIANCE_INTERPOLATED_CM30"
-            if len(evaluated_chains) >= 2
-            else "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY"
-        )
+        if surface_coverage_status == "MULTI_EXPIRY_FULL" and len(evaluated_chains) >= 2:
+            t_and_ivs = [(t_y, iv) for (_, _, _, t_y, iv) in evaluated_chains]
+            cm30_iv, ts_slope, ts_regime = compute_variance_interpolated_cm30_iv(
+                t_and_ivs, target_days=30.0
+            )
+            iv_source_lbl = "LIVE_VARIANCE_INTERPOLATED_CM30"
+        else:
+            # Never certify multi-expiry CM30 / term-structure regime when required expiries or legs are unpriced
+            cm30_iv, ts_slope, ts_regime = compute_variance_interpolated_cm30_iv(
+                [(anchor_t_yrs, anchor_atm_iv)], target_days=30.0
+            )
+            iv_source_lbl = (
+                "UNCERTIFIED_INCOMPLETE_SURFACE"
+                if surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE"
+                else "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY"
+            )
 
         eod_vol_summary = load_eod_volatility_history(
             eod_archive_path=config.resolved_eod_archive_path(),
@@ -712,6 +1109,8 @@ def run_analyst_pipeline(
                 f"out of {len(contract_ctx.active_expiries)} active expiries (multi-expiry surface "
                 f"interpolation inactive under small-batch pacing cap)."
             )
+        elif surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE":
+            qa_notes_combined.append(surface_coverage_detail)
         if uncovered_held_neos:
             qa_notes_combined.append(
                 f"UNCOVERED_HELD_CONTRACTS: open-position symbol(s) {uncovered_held_neos} "
@@ -811,7 +1210,7 @@ def run_analyst_pipeline(
         latest_q = max(env.latest_quote_ist for (_, env, _, _, _) in evaluated_chains)
         evaluated_chains_count = len(evaluated_chains)
         any_fetch_time_unverified = any(
-            "FETCH_TIME_NOT_EXCHANGE" in env.source_verification_tag
+            any(tok in env.source_verification_tag for tok in _UNVERIFIED_QUOTE_TS_TAGS)
             for (_, env, _, _, _) in evaluated_chains
         )
         chain_provenance = [
@@ -819,6 +1218,8 @@ def run_analyst_pipeline(
                 "expiry_date": m.expiry_date,
                 "earliest_quote_ist": env.earliest_quote_ist,
                 "latest_quote_ist": env.latest_quote_ist,
+                "fetch_started_at_ist": env.fetch_started_at_ist,
+                "fetch_completed_at_ist": env.fetch_completed_at_ist,
                 "source_verification_tag": env.source_verification_tag,
                 "lot_size": m.lot_size,
             }
@@ -865,7 +1266,9 @@ def run_analyst_pipeline(
             capture_started_at_ist=capture_started_dt.isoformat(),
             capture_completed_at_ist=capture_completed_dt.isoformat(),
             surface_coverage_status=surface_coverage_status,
+            surface_coverage_detail=surface_coverage_detail,
             uncovered_held_neo_symbols=uncovered_held_neos,
+            coverage_ledger=run_coverage_ledger,
         )
         provisional_state = NiftyOptionsState(
             run_metadata=provisional_meta,
@@ -990,6 +1393,7 @@ def run_analyst_pipeline(
     ivp_unknown = vol_evidence.ivp_30d == "UNKNOWN" or vol_evidence.ivp_90d == "UNKNOWN"
     live_gates_unverified = config.mode == "LIVE_MORNING_SNAPSHOT"
     uncovered_held = bool(meta.uncovered_held_neo_symbols)
+    surface_incomplete = meta.surface_coverage_status != "MULTI_EXPIRY_FULL"
 
     prelim_is_live_ready = (
         selected_primary is not None
@@ -998,6 +1402,7 @@ def run_analyst_pipeline(
         and not ivp_unknown
         and not any_fetch_time_unverified
         and not uncovered_held
+        and not surface_incomplete
         and not live_gates_unverified
     )
 
@@ -1072,13 +1477,17 @@ def run_analyst_pipeline(
             reasons.append(
                 f"UNCOVERED_HELD_CONTRACTS: {meta.uncovered_held_neo_symbols} not depth-covered on evaluated expiry(s)."
             )
+        if surface_incomplete:
+            reasons.append(
+                f"{meta.surface_coverage_status}: {meta.surface_coverage_detail or 'multi-expiry surface incomplete'}."
+            )
         if ivp_unknown:
             reasons.append(
                 "IVP is UNKNOWN; output is labelled research-only per Section 4.2 & 5A.8."
             )
         if any_fetch_time_unverified:
             reasons.append(
-                "Option chain quote timestamps use FETCH_TIME_NOT_EXCHANGE (unverified exchange quote as-of)."
+                "Option chain quote timestamps use unverified semantics (`FETCH_TIME_NOT_EXCHANGE` / `UNVERIFIED_KOTAK_REST_LSTUP_TIME`)."
             )
         if live_gates_unverified:
             reasons.append(
@@ -1150,6 +1559,10 @@ def run_analyst_pipeline(
         staleness_notes.append(
             "Surface coverage: SINGLE_EXPIRY_DEGRADED (anchor expiry only; multi-expiry surface not evaluated)."
         )
+    elif meta.surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE":
+        staleness_notes.append(
+            f"Surface coverage: {meta.surface_coverage_detail or 'INCOMPLETE_SURFACE_COVERAGE (multi-expiry surface NOT certified).'}"
+        )
     if meta.uncovered_held_neo_symbols:
         staleness_notes.append(
             f"WARNING: Held open-position contract(s) {meta.uncovered_held_neo_symbols} not depth-covered."
@@ -1196,14 +1609,18 @@ def run_analyst_pipeline(
         consolidator_state=final_consolidator,
     )
 
+    extra_diag: dict[str, Any] = {}
+    if all_rejected_books:
+        extra_diag["rejected_depth_books"] = all_rejected_books
+    if meta.coverage_ledger:
+        extra_diag["coverage_ledger"] = meta.coverage_ledger
+
     delivery = deliver_run_output(
         state=completed_state,
         audit_log_path=config.audit_log_path,
         scrubber=scrubber,
         force_render_for_inspection=force_render_for_inspection,
         suppress_trader_alerts=suppress_trader_alerts,
-        extra_audit_metadata=(
-            {"rejected_depth_books": all_rejected_books} if all_rejected_books else None
-        ),
+        extra_audit_metadata=(extra_diag if extra_diag else None),
     )
     return completed_state, delivery

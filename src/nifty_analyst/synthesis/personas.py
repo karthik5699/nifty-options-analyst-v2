@@ -164,6 +164,7 @@ def build_compact_desk_brief(
             "decision_timestamp_ist": state.run_metadata.decision_timestamp_ist,
             "mode": state.run_metadata.mode,
             "surface_coverage_status": state.run_metadata.surface_coverage_status,
+            "surface_coverage_detail": state.run_metadata.surface_coverage_detail,
             "uncovered_held_neo_symbols": state.run_metadata.uncovered_held_neo_symbols,
             "spot": state.contract_context.spot.value,
             "active_expiries": [
@@ -298,6 +299,7 @@ def is_pre_llm_live_ready_eligible(
         and state.portfolio_exposure_state.portfolio_state_status == "VERIFIED"
         and vol.ivp_30d != "UNKNOWN"
         and vol.ivp_90d != "UNKNOWN"
+        and state.run_metadata.surface_coverage_status == "MULTI_EXPIRY_FULL"
         and not state.run_metadata.uncovered_held_neo_symbols
     )
 

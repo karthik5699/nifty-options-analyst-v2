@@ -28,9 +28,10 @@ class AnalystConfig:
     kotak_min_request_interval_seconds: float = 2.5
     kotak_max_queue_wait_seconds: float = 35.0
     kotak_chain_strike_count: int = 40
-    kotak_quotes_batch_size: int = 2
+    kotak_quotes_batch_size: int = 4
     kotak_max_depth_tokens_per_expiry: int = 12
     max_quote_staleness_seconds: int = 180
+    max_leg_timestamp_skew_seconds: float = 30.0
     kotak_api_root: str = ""
 
     # Pricing & Execution Cost parameters (STT intentionally excluded per trader directive)
@@ -166,11 +167,14 @@ class AnalystConfig:
                 env.get("KOTAK_MAX_QUEUE_WAIT_SECONDS", "35.0")
             ),
             kotak_chain_strike_count=max(1, int(env.get("KOTAK_CHAIN_STRIKE_COUNT", "40"))),
-            kotak_quotes_batch_size=max(1, min(50, int(env.get("KOTAK_QUOTES_BATCH_SIZE", "2")))),
+            kotak_quotes_batch_size=max(1, min(50, int(env.get("KOTAK_QUOTES_BATCH_SIZE", "4")))),
             kotak_max_depth_tokens_per_expiry=max(
                 4, int(env.get("KOTAK_MAX_DEPTH_TOKENS_PER_EXPIRY", "12"))
             ),
             max_quote_staleness_seconds=int(env.get("MAX_QUOTE_STALENESS_SECONDS", "180")),
+            max_leg_timestamp_skew_seconds=max(
+                0.0, float(env.get("MAX_LEG_TIMESTAMP_SKEW_SECONDS", "30.0"))
+            ),
             kotak_api_root=env.get("KOTAK_API_ROOT", "").strip(),
             risk_free_rate_annual=float(env.get("RISK_FREE_RATE_ANNUAL", "0.0675")),
             slippage_buffer_points_per_leg=float(

@@ -341,6 +341,18 @@ class RawStrikeQuote:
     call_sell_levels: tuple[tuple[float, int], ...] = ()
     put_buy_levels: tuple[tuple[float, int], ...] = ()
     put_sell_levels: tuple[tuple[float, int], ...] = ()
+    call_quote_timestamp_ist: str = ""
+    put_quote_timestamp_ist: str = ""
+    fetch_started_at_ist: str = ""
+    fetch_completed_at_ist: str = ""
+    call_ts_semantics: str = ""
+    put_ts_semantics: str = ""
+
+    def quote_timestamp_for(self, option_type: OptionType) -> str:
+        """Return the per-contract quote timestamp for CE or PE, falling back to strike timestamp."""
+        if option_type == "CE":
+            return self.call_quote_timestamp_ist or self.quote_timestamp_ist
+        return self.put_quote_timestamp_ist or self.quote_timestamp_ist
 
     @property
     def has_executable_call(self) -> bool:
@@ -477,6 +489,7 @@ def run_chain_qa_suite(
     parity_tolerance_points: float = 25.0,
     atm_iv_diff_limit: float = 0.005,  # 0.5 vol points (0.5% = 0.005)
     arbitrage_epsilon: float = 0.50,
+    max_leg_timestamp_skew_seconds: float = 30.0,
 ) -> ChainQAResult:
     """Execute mandatory Section 4.1 QA suite before any option chain is used.
 
@@ -509,10 +522,14 @@ def run_chain_qa_suite(
     ]
     strike_step = min(strike_intervals) if strike_intervals else 50.0
 
+    theo_fwd = spot * math.exp(risk_free_rate * max(time_to_expiry_years, 0.0))
     nearest_three = sorted(ordered, key=lambda q: abs(q.strike - spot))[:3]
-    missing_atm = [q.strike for q in nearest_three if not q.has_both_executable]
+    nearest_fwd_three = sorted(ordered, key=lambda q: abs(q.strike - theo_fwd))[:3]
+    missing_spot_atm = [q.strike for q in nearest_three if not q.has_both_executable]
+    missing_fwd_atm = [q.strike for q in nearest_fwd_three if not q.has_both_executable]
     both_priced = [q for q in ordered if q.has_both_executable]
-    if missing_atm or len(both_priced) < 3:
+    if (missing_spot_atm and missing_fwd_atm) or len(both_priced) < 3:
+        missing_atm = missing_spot_atm
         notes.append(
             f"CHAIN_ATM_DEPTH_MISSING: near-ATM strikes {missing_atm} lack executable two-sided "
             f"depth books (priced_pairs={len(both_priced)})."
@@ -527,6 +544,46 @@ def run_chain_qa_suite(
             parity_max_deviation_points=0.0,
             notes=notes,
         )
+
+    # 0b. Per-leg timestamp synchronization across near-ATM CE/PE parity pairs
+    parity_candidates = sorted(both_priced, key=lambda q: abs(q.strike - spot))[:5]
+    for q_pair in parity_candidates:
+        c_ts = q_pair.quote_timestamp_for("CE")
+        p_ts = q_pair.quote_timestamp_for("PE")
+        if c_ts and p_ts:
+            try:
+                c_dt = ensure_ist(dt.datetime.fromisoformat(c_ts))
+                p_dt = ensure_ist(dt.datetime.fromisoformat(p_ts))
+                skew_s = abs((c_dt - p_dt).total_seconds())
+            except ValueError:
+                notes.append(
+                    f"CHAIN_PARITY_LEG_TIMESTAMP_DISAGREEMENT: malformed CE/PE timestamp at strike {q_pair.strike}."
+                )
+                return ChainQAResult(
+                    passed=False,
+                    failure_code="CHAIN_PARITY_LEG_TIMESTAMP_DISAGREEMENT",
+                    implied_forward=spot,
+                    atm_strike=q_pair.strike,
+                    atm_call_iv=0.0,
+                    atm_put_iv=0.0,
+                    parity_max_deviation_points=0.0,
+                    notes=notes,
+                )
+            if skew_s > max_leg_timestamp_skew_seconds:
+                notes.append(
+                    f"CHAIN_PARITY_LEG_TIMESTAMP_DISAGREEMENT: strike {q_pair.strike} CE ({c_ts}) vs "
+                    f"PE ({p_ts}) diverge by {skew_s:.2f}s > {max_leg_timestamp_skew_seconds:.2f}s."
+                )
+                return ChainQAResult(
+                    passed=False,
+                    failure_code="CHAIN_PARITY_LEG_TIMESTAMP_DISAGREEMENT",
+                    implied_forward=spot,
+                    atm_strike=q_pair.strike,
+                    atm_call_iv=0.0,
+                    atm_put_iv=0.0,
+                    parity_max_deviation_points=0.0,
+                    notes=notes,
+                )
 
     # 1. Put-call parity check across up to 5 near-ATM strikes with executable books
     implied_f, near_forwards = infer_forward_from_near_atm_parity(

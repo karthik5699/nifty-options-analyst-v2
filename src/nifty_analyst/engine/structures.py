@@ -148,7 +148,7 @@ def build_option_leg(
         oi=oi,
         volume=vol,
         top_book_depth_lots=depth,
-        quote_timestamp_ist=quote.quote_timestamp_ist,
+        quote_timestamp_ist=quote.quote_timestamp_for(option_type),
         is_stale=is_stale,
         liquidity_score=liq_score,
         touch_available_qty=touch_qty,

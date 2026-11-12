@@ -88,6 +88,11 @@ def render_analyst_report(
         lines.append(
             "- **Surface Coverage**: `SINGLE_EXPIRY_DEGRADED` (anchor expiry only; multi-expiry surface interpolation not active on this path)"
         )
+    elif meta.surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE":
+        detail_sfx = f" — {meta.surface_coverage_detail}" if meta.surface_coverage_detail else ""
+        lines.append(
+            f"- **Surface Coverage**: `INCOMPLETE_SURFACE_COVERAGE` (multi-expiry surface comparison NOT certified{detail_sfx})"
+        )
     if meta.uncovered_held_neo_symbols:
         lines.append(
             f"- **Uncovered Held Contracts Warning**: `{meta.uncovered_held_neo_symbols}` not depth-covered on evaluated expiry(s)"

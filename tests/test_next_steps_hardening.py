@@ -2653,4 +2653,1298 @@ def test_targeted_fix5_missing_confirmation_forces_contested_wait_even_with_supp
     assert cons_nn.recommended_structure_id == ic_cand.structure_id
 
 
+# ============================================================================
+# KOTAK NEO DIAGNOSTIC HANDOFF (12 NOV 2026) — ACCEPTANCE REGRESSION SUITE
+# ============================================================================
+
+
+def _build_synthetic_multi_expiry_env(
+    spot: float = 25000.0,
+    mkt_lot: int = 65,
+    expiries: list[str] | None = None,
+    quote_lstup_epoch: int | str | None = 1793940298,  # 2026-11-06T10:14:58+05:30
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
+    """Build deterministic multi-expiry 81-strike chains + per-token quote maps (zero credentials)."""
+    from nifty_analyst.engine.pricing import black76_price
+
+    exp_list = expiries or [
+        "2026-11-12",
+        "2026-11-19",
+        "2026-11-26",
+        "2026-12-03",
+        "2026-12-10",
+        "2026-12-17",
+        "2026-12-24",
+        "2026-12-31",
+        "2027-01-07",
+        "2027-01-14",
+        "2027-01-21",
+        "2027-01-28",
+        "2027-02-04",
+        "2027-02-11",
+        "2027-02-18",
+        "2027-02-25",
+        "2027-03-25",
+        "2027-06-24",
+    ]
+    chains_by_exp: dict[str, dict[str, Any]] = {}
+    quotes_by_tok: dict[str, dict[str, Any]] = {}
+    dec_date = dt.date(2026, 11, 6)
+
+    for exp_idx, exp_s in enumerate(exp_list):
+        exp_d = dt.date.fromisoformat(exp_s)
+        dte_cal = max(1, (exp_d - dec_date).days)
+        t_yr = max(dte_cal / 365.0, 1.0 / 365.0)
+        r_rate = 0.0675
+        fwd = round(spot * (1.0 + r_rate * t_yr), 2)
+        base_iv = 0.135 + min(0.025, 0.0015 * exp_idx)
+        strikes_raw: list[dict[str, Any]] = []
+        tag = exp_s.replace("-", "")
+
+        for idx in range(-40, 41):
+            k = spot + idx * 50.0
+            c_theo = max(0.35, black76_price(fwd, k, t_yr, r_rate, base_iv, "CE"))
+            p_theo = max(0.35, black76_price(fwd, k, t_yr, r_rate, base_iv, "PE"))
+            ce_tok = f"{tag}_{int(k)}CE"
+            pe_tok = f"{tag}_{int(k)}PE"
+            strikes_raw.append(
+                {
+                    "strike_price": k,
+                    "CE": {
+                        "neo_symbol": f"nse_fo|{ce_tok}",
+                        "ltp": round(c_theo, 2),
+                        "open_interest": 140000,
+                        "volume": 35000,
+                    },
+                    "PE": {
+                        "neo_symbol": f"nse_fo|{pe_tok}",
+                        "ltp": round(p_theo, 2),
+                        "open_interest": 145000,
+                        "volume": 36000,
+                    },
+                }
+            )
+            for tok, mid in ((ce_tok, c_theo), (pe_tok, p_theo)):
+                half_sp = max(0.20, round(mid * 0.005, 2))
+                b1 = round(max(0.10, mid - half_sp), 2)
+                a1 = round(mid + half_sp, 2)
+                q_item: dict[str, Any] = {
+                    "exchange": "nse_fo",
+                    "exchange_token": tok,
+                    "mktLot": str(mkt_lot),
+                    "ltp": str(round(mid, 2)),
+                    "depth": {
+                        "buy": [
+                            {"price": str(b1), "quantity": str(mkt_lot * 8), "orders": "4"},
+                            {
+                                "price": str(round(max(0.05, b1 - 0.15), 2)),
+                                "quantity": str(mkt_lot * 12),
+                                "orders": "6",
+                            },
+                        ],
+                        "sell": [
+                            {"price": str(a1), "quantity": str(mkt_lot * 10), "orders": "5"},
+                            {
+                                "price": str(round(a1 + 0.15, 2)),
+                                "quantity": str(mkt_lot * 15),
+                                "orders": "7",
+                            },
+                        ],
+                    },
+                }
+                if quote_lstup_epoch is not None:
+                    q_item["lstup_time"] = str(quote_lstup_epoch)
+                quotes_by_tok[tok] = q_item
+
+        chains_by_exp[exp_s] = {
+            "status": "OK",
+            "lot_size": mkt_lot,
+            "underlying_prices": {
+                "reference_price": spot,
+                "futures_price": fwd,
+                "spot_price": spot,
+            },
+            "strikes": strikes_raw,
+        }
+
+    return chains_by_exp, quotes_by_tok, exp_list
+
+
+def _build_synthetic_candles_for_dec(dec_date: dt.date = dt.date(2026, 11, 6)) -> dict[str, list[dict[str, Any]]]:
+    """Deterministic completed 1D, 60min, and 15min bars up to `dec_date` 10:15 IST."""
+    daily: list[dict[str, Any]] = []
+    cur = dec_date - dt.timedelta(days=85)
+    lvl = 24600.0
+    while cur < dec_date:
+        if cur.weekday() < 5:
+            lvl += 8.0
+            daily.append(
+                {
+                    "time": cur.isoformat(),
+                    "open": round(lvl - 25.0, 2),
+                    "high": round(lvl + 40.0, 2),
+                    "low": round(lvl - 45.0, 2),
+                    "close": round(lvl, 2),
+                    "volume": 500000,
+                }
+            )
+        cur += dt.timedelta(days=1)
+
+    hourly: list[dict[str, Any]] = []
+    cur_h = dec_date - dt.timedelta(days=12)
+    hlvl = 24880.0
+    slots = [
+        ("09:15:00", "10:15:00"),
+        ("10:15:00", "11:15:00"),
+        ("11:15:00", "12:15:00"),
+        ("12:15:00", "13:15:00"),
+        ("13:15:00", "14:15:00"),
+        ("14:15:00", "15:15:00"),
+    ]
+    while cur_h <= dec_date:
+        if cur_h.weekday() < 5:
+            day_slots = slots[:1] if cur_h == dec_date else slots
+            for op_s, cl_s in day_slots:
+                hlvl += 3.0
+                hourly.append(
+                    {
+                        "time": f"{cur_h.isoformat()}T{op_s}+05:30",
+                        "close_time_ist": f"{cur_h.isoformat()}T{cl_s}+05:30",
+                        "open": round(hlvl - 8.0, 2),
+                        "high": round(hlvl + 16.0, 2),
+                        "low": round(hlvl - 14.0, 2),
+                        "close": round(hlvl, 2),
+                        "volume": 90000,
+                    }
+                )
+        cur_h += dt.timedelta(days=1)
+
+    prev_sess = dec_date - dt.timedelta(days=1)
+    closing_15m = [
+        {
+            "time": f"{prev_sess.isoformat()}T15:15:00+05:30",
+            "close_time_ist": f"{prev_sess.isoformat()}T15:30:00+05:30",
+            "open": 24990.0,
+            "high": 25015.0,
+            "low": 24982.0,
+            "close": 25000.0,
+            "volume": 32000,
+        }
+    ]
+    return {"D": daily, "60min": hourly, "15min": closing_15m}
+
+
+def test_kotak_handoff_acceptance1_live_nov17_depth_anomalies_diagnostic_sort_and_distinct_risk_metrics() -> None:
+    """Acceptance 1: Reject exact Nov 17 25300 CE/PE mixed depth order before sorting, keep sorted
+    copies strictly diagnostic, walk valid books for required units, retain indicative sparse touches,
+    and preserve distinct gross/net & 4 rupee risk metrics.
+    """
+    # 1A. Exact public-market Nov 17 NIFTY 25300 CE from 12 Nov 2026 capture (handoff lines 29-35)
+    nov17_25300_ce = {
+        "exchange": "nse_fo",
+        "exchange_token": "NOV17_25300CE",
+        "mktLot": "65",
+        "lstup_time": "1794455573",
+        "depth": {
+            "buy": [
+                {"price": "204.20", "quantity": "715"},
+                {"price": "204.00", "quantity": "1950"},
+                {"price": "203.95", "quantity": "65"},
+                {"price": "203.85", "quantity": "65"},
+                {"price": "203.75", "quantity": "65"},
+            ],
+            "sell": [
+                {"price": "204.70", "quantity": "390"},
+                {"price": "204.25", "quantity": "585"},
+                {"price": "204.30", "quantity": "845"},
+                {"price": "204.35", "quantity": "1170"},
+                {"price": "204.40", "quantity": "845"},
+            ],
+        },
+    }
+    ce_book = interpret_depth_book(nov17_25300_ce, fallback_lot_size=65)
+    assert ce_book.is_executable is False
+    assert ce_book.is_structurally_valid is False
+    assert ce_book.rejection_reason == "DEPTH_LEVEL_ORDER_INCONSISTENT"
+    # Row-0 (204.70) and sorted best (204.25) MUST NEVER leak into executable touch or levels
+    assert (ce_book.best_bid, ce_book.best_ask) == (None, None)
+    assert ce_book.buy_levels == ()
+    assert ce_book.sell_levels == ()
+    # Sorted copy exists strictly for diagnostics
+    assert ce_book.diagnostic_sorted_sell_levels[0] == (204.25, 585)
+    assert ce_book.diagnostic_sorted_sell_levels[-1] == (204.70, 390)
+
+    # 1B. Exact Nov 17 NIFTY 25300 PE non-monotonic bids (222.40 then 222.65; handoff line 35)
+    nov17_25300_pe = {
+        "exchange": "nse_fo",
+        "exchange_token": "NOV17_25300PE",
+        "mktLot": "65",
+        "depth": {
+            "buy": [
+                {"price": "222.40", "quantity": "65"},
+                {"price": "222.65", "quantity": "130"},
+                {"price": "222.30", "quantity": "195"},
+            ],
+            "sell": [
+                {"price": "223.10", "quantity": "130"},
+                {"price": "223.25", "quantity": "195"},
+            ],
+        },
+    }
+    pe_book = interpret_depth_book(nov17_25300_pe, fallback_lot_size=65)
+    assert pe_book.is_executable is False
+    assert pe_book.rejection_reason == "DEPTH_LEVEL_ORDER_INCONSISTENT"
+    assert (pe_book.best_bid, pe_book.best_ask) == (None, None)
+    assert pe_book.buy_levels == ()
+    assert pe_book.diagnostic_sorted_buy_levels[0] == (222.65, 130)
+
+    # Rejected strike cannot be used to price any leg
+    cfg = AnalystConfig(mode="OFFLINE", fixtures_dir=str(FIXTURES_DIR))
+    rejected_q = RawStrikeQuote(
+        strike=25300.0,
+        call_bid=ce_book.best_bid,
+        call_ask=ce_book.best_ask,
+        put_bid=pe_book.best_bid,
+        put_ask=pe_book.best_ask,
+    )
+    with pytest.raises(ValueError, match="unpriced/non-executable"):
+        build_option_leg(rejected_q, "CE", "LONG", 1, 25300.0, 0.02, 0.0675, False, cfg)
+
+    # 1C. Valid multi-level book walking + sparse touch indicative retention + distinct risk metrics
+    vwap_2lots, avail_qty = walk_depth_levels([(100.0, 30), (101.0, 50), (103.0, 50)], 130)
+    assert avail_qty == 130
+    assert vwap_2lots == pytest.approx((30 * 100.0 + 50 * 101.0 + 50 * 103.0) / 130.0)
+
+    sparse_short_q = RawStrikeQuote(
+        strike=24900.0,
+        call_bid=210.0,
+        call_ask=211.0,
+        put_bid=95.0,
+        put_ask=96.0,
+        call_oi=80000,
+        put_oi=80000,
+        call_volume=20000,
+        put_volume=20000,
+        put_touch_bid_qty=15,
+        put_visible_buy_qty=30,
+        put_buy_levels=((95.0, 15), (94.5, 15)),
+        quote_timestamp_ist="2026-11-06T10:14:55+05:30",
+    )
+    sparse_long_q = RawStrikeQuote(
+        strike=24750.0,
+        call_bid=310.0,
+        call_ask=312.0,
+        put_bid=44.0,
+        put_ask=45.0,
+        call_oi=80000,
+        put_oi=80000,
+        call_volume=20000,
+        put_volume=20000,
+        put_touch_ask_qty=80,
+        put_visible_sell_qty=80,
+        put_sell_levels=((45.0, 80),),
+        quote_timestamp_ist="2026-11-06T10:14:55+05:30",
+    )
+    sparse_leg_s = build_option_leg(
+        sparse_short_q, "PE", "SHORT", 1, 25000.0, 0.02, 0.0675, False, cfg
+    )
+    sparse_leg_l = build_option_leg(
+        sparse_long_q, "PE", "LONG", 1, 25000.0, 0.02, 0.0675, False, cfg
+    )
+
+    deep_short_q = RawStrikeQuote(
+        strike=24900.0,
+        call_bid=210.0,
+        call_ask=211.0,
+        put_bid=95.0,
+        put_ask=96.0,
+        call_oi=90000,
+        put_oi=95000,
+        call_volume=25000,
+        put_volume=25000,
+        put_touch_bid_qty=30,
+        put_visible_buy_qty=90,
+        put_buy_levels=((95.0, 30), (94.0, 60)),
+        quote_timestamp_ist="2026-11-06T10:14:55+05:30",
+    )
+    deep_long_q = RawStrikeQuote(
+        strike=24750.0,
+        call_bid=310.0,
+        call_ask=312.0,
+        put_bid=44.0,
+        put_ask=45.0,
+        call_oi=90000,
+        put_oi=95000,
+        call_volume=25000,
+        put_volume=25000,
+        put_touch_ask_qty=25,
+        put_visible_sell_qty=80,
+        put_sell_levels=((45.0, 25), (46.0, 55)),
+        quote_timestamp_ist="2026-11-06T10:14:55+05:30",
+    )
+    leg_s = build_option_leg(
+        deep_short_q, "PE", "SHORT", 1, 25000.0, 0.02, 0.0675, False, cfg
+    )
+    leg_l = build_option_leg(
+        deep_long_q, "PE", "LONG", 1, 25000.0, 0.02, 0.0675, False, cfg
+    )
+
+    exp_m = ExpiryMetadata(
+        expiry_date="2026-11-12",
+        expiry_timestamp_ist="2026-11-12T15:30:00+05:30",
+        dte_trading_sessions=4,
+        lot_size=65,
+        is_holiday_adjusted=False,
+        holiday_note="",
+        is_monthly=False,
+    )
+    port = build_portfolio_exposure_state(
+        [
+            OpenPosition(
+                position_id="POS_EXISTING",
+                structure_type="BULL_PUT_SPREAD",
+                directional_sign=1,
+                planned_stop_rs=1200.0,
+                current_executable_spread_value_rs=400.0,
+                short_leg_deltas=[-0.18],
+                dte_trading_sessions=4,
+            )
+        ],
+        portfolio_cap_rs=10000.0,
+    )
+    ps_stub = PriceStructureEvidence(
+        trend_1d_state="UPTREND",
+        higher_high_higher_low_repaired=True,
+        first_pullback_in_downtrend_warning=False,
+        ma20_1h=24960.0,
+        ema50_1h=24910.0,
+        last_completed_1d_bar=None,
+        last_completed_1h_bar=None,
+        final_15m_bar_completed=True,
+        stripped_forming_bars_count=0,
+        verified_level_touches=[],
+    )
+    vol_stub = VolatilityEvidence(
+        india_vix=TimestampedDatum.create(
+            14.2,
+            dt.datetime(2026, 11, 6, 10, 14, 55, tzinfo=IST),
+            dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST),
+            "vix",
+            180,
+            "VERIFIED",
+        ),
+        atm_iv_by_expiry={"2026-11-12": 0.14},
+        constant_maturity_30d_iv=0.14,
+        eod_cm30_latest=0.14,
+        iv_source_label="LIVE_VARIANCE_INTERPOLATED_CM30",
+        ivp_30d=62.0,
+        ivp_90d=65.0,
+        ivp_252d=58.0,
+        iv_history_sessions_count=252,
+        iv_history_gaps_flagged=[],
+        realized_vol_20d=0.12,
+        iv_rv_spread=0.02,
+        skew_25d_put_minus_call=0.02,
+        wing_curvature=0.005,
+        chain_qa_passed=True,
+        chain_qa_notes=[],
+    )
+    sparse_cand = build_candidate_structure(
+        structure_id="BPS_SPARSE_NOV12",
+        structure_type="BULL_PUT_SPREAD",
+        direction="BULLISH",
+        expiry=exp_m,
+        legs=[sparse_leg_s, sparse_leg_l],
+        spot=25000.0,
+        implied_forward=25020.0,
+        atm_iv=0.14,
+        time_to_expiry_years=6.0 / 365.0,
+        empirical_daily_log_returns=[-0.01, 0.008, -0.012, 0.009, 0.004],
+        invalidation_level=24880.0,
+        invalidation_candle_basis="COMPLETED_1H_CLOSE",
+        invalidation_justification="1H close below 24880.",
+        matches_part_b_style=True,
+        portfolio_state=port,
+        price_structure=ps_stub,
+        volatility=vol_stub,
+        config=cfg,
+        forced_lots=1,
+    )
+    assert sparse_cand.full_size_fill_supported is False
+    assert sparse_cand.legs[0].fill_basis == "INDICATIVE_TOUCH_ONLY"
+    assert sparse_cand.legs[0].vwap_fill_price is None
+    assert sparse_cand.part_a_overall_status == "FAIL"
+
+    cand = build_candidate_structure(
+        structure_id="BPS_NOV12_24900_24750",
+        structure_type="BULL_PUT_SPREAD",
+        direction="BULLISH",
+        expiry=exp_m,
+        legs=[leg_s, leg_l],
+        spot=25000.0,
+        implied_forward=25020.0,
+        atm_iv=0.14,
+        time_to_expiry_years=6.0 / 365.0,
+        empirical_daily_log_returns=[-0.01, 0.008, -0.012, 0.009, 0.004],
+        invalidation_level=24880.0,
+        invalidation_candle_basis="COMPLETED_1H_CLOSE",
+        invalidation_justification="1H close below 24880.",
+        matches_part_b_style=True,
+        portfolio_state=port,
+        price_structure=ps_stub,
+        volatility=vol_stub,
+        config=cfg,
+        forced_lots=1,
+    )
+    assert cand.full_size_fill_supported is True
+    assert cand.execution_fill_basis == "FULL_SIZE_BOOK_WALK"
+    assert cand.legs[0].fill_basis == "FULL_SIZE_BOOK_WALK"
+    assert cand.legs[1].fill_basis == "FULL_SIZE_BOOK_WALK"
+    assert cand.executable_net_points_per_unit != cand.indicative_touch_net_points_per_unit
+    assert cand.breakevens_gross != cand.breakevens_net
+    assert cand.statutory_charges.total_charges_rs > 0.0
+    four_risk_metrics = {
+        cand.contractual_max_loss_rs,
+        cand.planned_stop_rs,
+        cand.portfolio_summed_stop_after_trade_rs,
+        cand.margin_estimate_rs,
+    }
+    assert len(four_risk_metrics) == 4
+
+
+def test_kotak_handoff_acceptance2_timestamps_provenance_disagreement_and_180s_final_deadline(
+    tmp_path: Path,
+) -> None:
+    """Acceptance 2: Normalize Unix-second lstup_time while keeping REST meaning UNVERIFIED,
+    separate fetch-start / fetch-complete / per-contract quote-as-of, reject future/stale/missing/
+    malformed/wrong-unit values without fetch-time substitution, catch per-leg skew, and enforce
+    180s capture-start deadline at final output without clock reset on resume or chart render.
+    """
+    from nifty_analyst.adapters.kotak_neo import (
+        LiveKotakNeoAdapter,
+        parse_and_validate_option_chain,
+    )
+    from nifty_analyst.adapters.request_safety import normalize_contract_quote_timestamp
+    from nifty_analyst.engine.part_a_gatekeeper import evaluate_part_a_rules
+    from nifty_analyst.engine.pricing import run_chain_qa_suite
+
+    # 2A. Exact live sample raw value: lstup_time = "1794455573" -> 2026-11-12T09:22:53+05:30
+    capture_ref = dt.datetime(2026, 11, 12, 9, 22, 55, tzinfo=IST)
+    ev_live = normalize_contract_quote_timestamp(
+        {"lstup_time": "1794455573"},
+        capture_ref,
+        max_staleness_seconds=180.0,
+        max_future_skew_seconds=5.0,
+        verified_semantics=False,
+        require_present=True,
+    )
+    assert ev_live.is_valid is True
+    assert ev_live.is_certified is False
+    assert ev_live.normalized_quote_as_of_ist == "2026-11-12T09:22:53+05:30"
+    assert ev_live.raw_value == "1794455573"
+    assert ev_live.source_field == "lstup_time"
+    assert ev_live.detected_unit == "UNIX_EPOCH_SECONDS"
+    assert ev_live.semantics_status == "UNVERIFIED_KOTAK_REST_LSTUP_TIME"
+    assert ev_live.age_seconds == pytest.approx(2.0)
+
+    # 2B. Rejection matrix: future, stale, missing, malformed, naive ISO, ms/ns, and SFeed sentinel
+    bad_cases: list[tuple[dict[str, Any], str]] = [
+        ({"lstup_time": str(int(capture_ref.timestamp()) + 20)}, "QUOTE_TIMESTAMP_FUTURE_SKEW"),
+        ({"lstup_time": str(int(capture_ref.timestamp()) - 220)}, "QUOTE_TIMESTAMP_STALE"),
+        ({}, "QUOTE_TIMESTAMP_MISSING"),
+        ({"lstup_time": None}, "QUOTE_TIMESTAMP_MISSING"),
+        ({"lstup_time": ""}, "QUOTE_TIMESTAMP_MALFORMED"),
+        ({"lstup_time": "not_an_epoch"}, "QUOTE_TIMESTAMP_MALFORMED"),
+        ({"lstup_time": True}, "QUOTE_TIMESTAMP_MALFORMED"),
+        ({"lstup_time": "2026-11-12T09:22:53"}, "QUOTE_TIMESTAMP_NAIVE_TIMEZONE"),
+        ({"lstup_time": "1794455573000"}, "QUOTE_TIMESTAMP_WRONG_UNIT_MS_OR_NS"),
+        ({"lstup_time": "0"}, "QUOTE_TIMESTAMP_WRONG_UNIT_SENTINEL"),
+        ({"lstup_time": "-2209008600"}, "QUOTE_TIMESTAMP_WRONG_UNIT_SENTINEL"),
+        ({"lstup_time": "12345"}, "QUOTE_TIMESTAMP_WRONG_UNIT_RANGE"),
+    ]
+    for payload, expected_prefix in bad_cases:
+        res = normalize_contract_quote_timestamp(
+            payload,
+            capture_ref,
+            max_staleness_seconds=180.0,
+            max_future_skew_seconds=5.0,
+            verified_semantics=True,
+            require_present=True,
+        )
+        assert res.is_valid is False, f"Expected rejection for {payload}"
+        assert res.is_certified is False
+        assert expected_prefix in res.rejection_reason
+
+    # 2C. Adapter wiring: separate fetch_started_at_ist / fetch_completed_at_ist / per-leg CE & PE
+    #     quote_as_of_ist, and zero fetch-time substitution when timestamp is wrong-unit or missing!
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    chains_by_exp, quotes_by_tok, _ = _build_synthetic_multi_expiry_env(
+        spot=25000.0, mkt_lot=65, expiries=["2026-11-12"], quote_lstup_epoch=1793940298
+    )
+    # Give ATM 25000 CE and 25000 PE distinct valid timestamps (10:14:58 vs 10:14:54 IST),
+    # and corrupt 25200 CE with millisecond wrong-unit timestamp (must reject, NEVER substitute fetch time!)
+    quotes_by_tok["20261112_25000CE"]["lstup_time"] = "1793940298"  # 10:14:58+05:30
+    quotes_by_tok["20261112_25000PE"]["lstup_time"] = "1793940294"  # 10:14:54+05:30
+    quotes_by_tok["20261112_25200CE"]["lstup_time"] = "1793940298000"  # wrong unit (ms)
+
+    wall_seq = iter(
+        [
+            dt.datetime(2026, 11, 6, 10, 15, 1, tzinfo=IST),
+            dt.datetime(2026, 11, 6, 10, 15, 7, tzinfo=IST),
+            dt.datetime(2026, 11, 6, 10, 15, 9, tzinfo=IST),
+            dt.datetime(2026, 11, 6, 10, 15, 12, tzinfo=IST),
+        ]
+    )
+
+    class _Svc:
+        def get_full_option_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return chains_by_exp["2026-11-12"]
+
+    class _Cli:
+        def quotes(self, instrument_tokens: list[dict[str, str]], quote_type: str = "all") -> list[dict[str, Any]]:
+            return [
+                quotes_by_tok[t["instrument_token"]]
+                for t in instrument_tokens
+                if t["instrument_token"] in quotes_by_tok
+            ]
+
+    adapter = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+    adapter._service = _Svc()
+    adapter._auth = type("_A", (), {"require_authenticated_client": lambda self: (_Cli(), None, None)})()
+    adapter.rate_limiter = PacedReadTransport(min_interval_seconds=0.0, max_queue_wait_seconds=0.0)
+    adapter.enforce_schedule = True
+    adapter.depth_strikes_each_side = 40
+    adapter.quotes_batch_size = 4
+    adapter.max_depth_tokens_per_expiry = 14
+    adapter.extra_neo_symbols = ()
+    adapter.trading_calendar = {}
+    adapter.quote_ts_semantics_verified = False
+    adapter.require_contract_quote_timestamp = True
+    adapter.max_quote_staleness_seconds = 180.0
+    adapter.max_future_skew_seconds = 5.0
+    adapter._wall_clock_ist_fn = lambda: next(wall_seq)
+    adapter._cache = {}
+
+    raw_chain = adapter.fetch_option_chain_raw("2026-11-12", dec_dt)
+    env = parse_and_validate_option_chain(raw_chain, "2026-11-12", dec_dt)
+    assert env.fetch_started_at_ist == "2026-11-06T10:15:01+05:30"
+    assert env.fetch_completed_at_ist == "2026-11-06T10:15:07+05:30"
+    assert "UNVERIFIED_KOTAK_REST_LSTUP_TIME" in env.source_verification_tag
+
+    q_by_k = {q.strike: q for q in env.quotes}
+    q_25000 = q_by_k[25000.0]
+    assert q_25000.call_quote_timestamp_ist == "2026-11-06T10:14:58+05:30"
+    assert q_25000.put_quote_timestamp_ist == "2026-11-06T10:14:54+05:30"
+    assert q_25000.fetch_started_at_ist == "2026-11-06T10:15:01+05:30"
+    assert q_25000.fetch_completed_at_ist == "2026-11-06T10:15:07+05:30"
+
+    cfg_off = AnalystConfig(mode="OFFLINE", fixtures_dir=str(FIXTURES_DIR))
+    ce_leg = build_option_leg(
+        q_25000, "CE", "LONG", 1, 25000.0, 0.02, 0.0675, False, cfg_off
+    )
+    pe_leg = build_option_leg(
+        q_25000, "PE", "SHORT", 1, 25000.0, 0.02, 0.0675, False, cfg_off
+    )
+    assert ce_leg.quote_timestamp_ist == "2026-11-06T10:14:58+05:30"
+    assert pe_leg.quote_timestamp_ist == "2026-11-06T10:14:54+05:30"
+
+    # Wrong-unit 25200 CE was rejected to None (NOT substituted with fetch time!)
+    q_25200 = q_by_k[25200.0]
+    assert (q_25200.call_bid, q_25200.call_ask) == (None, None)
+    assert any(
+        r["neo_symbol"] == "nse_fo|20261112_25200CE"
+        and "QUOTE_TIMESTAMP_WRONG_UNIT_MS_OR_NS" in r["rejection_reason"]
+        for r in env.rejected_depth_books
+    )
+
+    # Missing timestamp when `require_contract_quote_timestamp=True` also rejects without substitution
+    del quotes_by_tok["20261112_24850PE"]["lstup_time"]
+    adapter._cache.clear()
+    raw_missing_ts = adapter.fetch_option_chain_raw("2026-11-12", dec_dt)
+    env_missing_ts = parse_and_validate_option_chain(raw_missing_ts, "2026-11-12", dec_dt)
+    q_24850 = {q.strike: q for q in env_missing_ts.quotes}[24850.0]
+    assert (q_24850.put_bid, q_24850.put_ask) == (None, None)
+    assert any(
+        r["neo_symbol"] == "nse_fo|20261112_24850PE"
+        and "QUOTE_TIMESTAMP_MISSING" in r["rejection_reason"]
+        for r in env_missing_ts.rejected_depth_books
+    )
+
+    # 2D. Per-leg timestamp disagreement: (i) Chain QA near-ATM parity & (ii) Part A Rule 8 multi-leg
+    skewed_quotes = [
+        dataclasses.replace(
+            q,
+            call_quote_timestamp_ist="2026-11-06T10:14:58+05:30",
+            put_quote_timestamp_ist="2026-11-06T10:14:05+05:30",  # 53s skew > 30s bound
+        )
+        if q.strike == 25000.0
+        else q
+        for q in env.quotes
+    ]
+    qa_skew = run_chain_qa_suite(
+        spot=25000.0,
+        quotes=skewed_quotes,
+        time_to_expiry_years=6.0 / 365.0,
+        risk_free_rate=0.0675,
+        max_leg_timestamp_skew_seconds=30.0,
+    )
+    assert qa_skew.passed is False
+    assert qa_skew.failure_code == "CHAIN_PARITY_LEG_TIMESTAMP_DISAGREEMENT"
+
+    # Multi-leg spread with 45s skew between short leg and long leg -> Rule 8 FAIL
+    base_state, _ = run_analyst_pipeline(
+        dec_dt,
+        AnalystConfig(
+            mode="OFFLINE",
+            fixtures_dir=str(FIXTURES_DIR),
+            audit_log_path=str(tmp_path / "base_skew_audit.jsonl"),
+        ),
+    )
+    multi_cand = next(c for c in base_state.candidate_structures if len(c.legs) >= 2)
+    skewed_legs = [
+        dataclasses.replace(
+            leg,
+            quote_timestamp_ist=(
+                "2026-11-06T10:14:58+05:30" if idx == 0 else "2026-11-06T10:14:10+05:30"
+            ),
+        )
+        for idx, leg in enumerate(multi_cand.legs)
+    ]
+    exp_cand = next(
+        e
+        for e in base_state.contract_context.active_expiries
+        if e.expiry_date == multi_cand.expiry_date
+    )
+    checks_skew, overall_skew = evaluate_part_a_rules(
+        is_defined_risk=True,
+        legs=skewed_legs,
+        dte_trading_sessions=exp_cand.dte_trading_sessions,
+        planned_stop_rs=multi_cand.planned_stop_rs,
+        portfolio_state=base_state.portfolio_exposure_state,
+        contractual_max_loss_rs=multi_cand.contractual_max_loss_rs,
+        invalidation_level=multi_cand.invalidation_level,
+        invalidation_candle_basis=multi_cand.invalidation_candle_basis,
+        invalidation_justification=multi_cand.invalidation_justification,
+        price_structure=base_state.market_evidence.price_structure,
+        volatility=base_state.market_evidence.volatility_state,
+        config=cfg_off,
+    )
+    assert overall_skew == "FAIL"
+    r8 = checks_skew["RULE_8_IVP_AND_LIQUIDITY_GATES"]
+    assert r8.status == "FAIL"
+    assert "LEG_TIMESTAMP_DISAGREEMENT" in r8.evidence
+
+    # 2E. 180s deadline measured from original capture_started_at_ist at final output
+    #     (resuming synthesis + rendering payoff chart MUST NOT reset the capture-start clock)
+    art_path = tmp_path / "resume_deadline" / "synthesis_response.json"
+    chart_dir = tmp_path / "charts_deadline"
+    cfg_res = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        llm_provider="agent_artifact",
+        agent_synthesis_artifact_path=str(art_path),
+        payoff_chart_dir=str(chart_dir),
+        audit_log_path=str(tmp_path / "resume_deadline_audit.jsonl"),
+    )
+    t0 = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    # Initial capture starts at t0 and finishes at t0+5s (artifact missing -> writes immutable snapshot)
+    cap_clocks = iter(
+        [
+            t0,
+            t0 + dt.timedelta(seconds=5),
+            t0 + dt.timedelta(seconds=6),
+        ]
+    )
+    with pytest.raises(FileNotFoundError):
+        run_analyst_pipeline(dec_dt, cfg_res, wall_clock_fn=lambda: next(cap_clocks))
+
+    req_path = tmp_path / "resume_deadline" / "synthesis_response.json.request.json"
+    req_data = json.loads(req_path.read_text(encoding="utf-8"))
+    _write_valid_agent_artifact(
+        art_path,
+        req_data,
+        chosen_card=req_data["compact_desk_brief"]["certified_pass_candidates"][0],
+    )
+
+    # Resume starts at t0+179s (passes initial resume check),
+    # and final output check after synthesis/chart render occurs at t0+183s
+    # (> 180s from original t0 capture start!) -> MUST fail closed and remove any chart!
+    res_clocks = iter(
+        [
+            t0 + dt.timedelta(seconds=179),
+            t0 + dt.timedelta(seconds=183),
+        ]
+    )
+    with pytest.raises(StaleEvidenceSnapshotError):
+        run_analyst_pipeline(
+            dec_dt,
+            cfg_res,
+            broker_adapter=_ForbiddenBrokerAdapter(),
+            wall_clock_fn=lambda: next(res_clocks),
+            force_render_for_inspection=True,
+        )
+    assert list(chart_dir.glob("*.png")) == []
+
+
+def test_kotak_handoff_acceptance3_bounded_multi_expiry_away_from_atm_and_incomplete_surface(
+    tmp_path: Path,
+) -> None:
+    """Acceptance 3: With 18 listed expiries, automatically select bounded required expiries within
+    the 35s/2.5s budget, include away-from-ATM monitored contracts on their own expiry, track all 7
+    coverage buckets separately, and mark INCOMPLETE_SURFACE_COVERAGE (never certifying surface
+    comparison) whenever a required leg or expiry is missing or rejected.
+    """
+    from nifty_analyst.adapters.kotak_neo import LiveKotakNeoAdapter
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    chains_by_exp, quotes_by_tok, exp_18 = _build_synthetic_multi_expiry_env(
+        spot=25000.0, mkt_lot=65, quote_lstup_epoch=1793940298
+    )
+    assert len(exp_18) == 18
+    candles_by_ivl = _build_synthetic_candles_for_dec(dec_dt.date())
+
+    def _make_18exp_live_adapter(
+        q_map: dict[str, dict[str, Any]],
+        cache_sub: Path,
+        fail_qa_on_exp: str | None = None,
+    ) -> tuple[LiveKotakNeoAdapter, list[str]]:
+        fetched_exps: list[str] = []
+
+        class _Svc18:
+            def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                return {"status": "OK", "expiries": list(exp_18)}
+
+            def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+            def get_full_option_chain(self, symbol: str, expiry: str | None = None, **kw: Any) -> dict[str, Any]:
+                exp_key = str(expiry or exp_18[0])
+                fetched_exps.append(exp_key)
+                raw_c = json.loads(json.dumps(chains_by_exp[exp_key]))
+                if fail_qa_on_exp and exp_key == fail_qa_on_exp:
+                    # Drop ATM strikes so Chain QA fails on this non-anchor required expiry
+                    raw_c["strikes"] = [
+                        s for s in raw_c["strikes"] if abs(float(s["strike_price"]) - 25000.0) > 300.0
+                    ]
+                return raw_c
+
+        class _Cli18:
+            def quotes(self, instrument_tokens: list[dict[str, str]], quote_type: str = "all") -> list[dict[str, Any]]:
+                out_q: list[dict[str, Any]] = []
+                for item in instrument_tokens:
+                    tok = item["instrument_token"]
+                    if tok in q_map:
+                        out_q.append(json.loads(json.dumps(q_map[tok])))
+                return out_q
+
+            def historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
+                return list(candles_by_ivl[kwargs["interval"]])
+
+        mono_t = [100.0]
+
+        def _fake_sleep(sec: float) -> None:
+            mono_t[0] += sec
+
+        limiter = PacedReadTransport(
+            min_interval_seconds=2.5,
+            max_queue_wait_seconds=35.0,
+            clock_fn=lambda: mono_t[0],
+            sleep_fn=_fake_sleep,
+        )
+        adp = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+        adp._service = _Svc18()
+        adp._auth = type("_A", (), {"require_authenticated_client": lambda self: (_Cli18(), None, None)})()
+        adp.rate_limiter = limiter
+        adp.enforce_schedule = True
+        adp.depth_strikes_each_side = 40
+        adp.quotes_batch_size = 4
+        adp.max_depth_tokens_per_expiry = 12
+        adp.extra_neo_symbols = ()
+        adp.cache_dir = cache_sub
+        adp.trading_calendar = {}
+        adp._cache = {}
+        return adp, fetched_exps
+
+    pos_file = tmp_path / "empty_pos.json"
+    pos_file.write_text("[]", encoding="utf-8")
+
+    # 3A. Away-from-ATM monitored position on its own non-anchor expiry ("2026-12-10", 23500 PE)
+    far_held_sym = "nse_fo|20261210_23500PE"
+    held_dec10 = OpenPosition(
+        position_id="POS_DEC10_FAR_OTM_PE",
+        structure_type="BULL_PUT_SPREAD",
+        directional_sign=1,
+        planned_stop_rs=1400.0,
+        current_executable_spread_value_rs=500.0,
+        short_leg_deltas=[-0.12],
+        dte_trading_sessions=24,
+        neo_symbols=[far_held_sym],
+        expiry_date="2026-12-10",
+    )
+    cfg_live = AnalystConfig(
+        mode="LIVE_MORNING_SNAPSHOT",
+        fixtures_dir=str(FIXTURES_DIR),
+        open_positions_file=str(pos_file),
+        cache_dir=str(tmp_path / "cache_3a"),
+        audit_log_path=str(tmp_path / "audit_3a.jsonl"),
+    )
+    adp_ok, fetched_ok = _make_18exp_live_adapter(quotes_by_tok, tmp_path / "cache_3a")
+    state_ok, deliv_ok = run_analyst_pipeline(
+        dec_dt,
+        cfg_live,
+        broker_adapter=adp_ok,
+        open_positions=[held_dec10],
+        force_render_for_inspection=True,
+    )
+    # Bounded selection: evaluated Anchor + Monitored Dec 10 (NOT all 18 expiries!), <= 35s wait
+    assert fetched_ok == ["2026-11-12", "2026-12-10"]
+    assert adp_ok.rate_limiter.cumulative_wait_seconds <= 35.0
+    assert state_ok.run_metadata.surface_coverage_status == "MULTI_EXPIRY_FULL"
+    assert state_ok.run_metadata.uncovered_held_neo_symbols == []
+    ledger_ok = state_ok.run_metadata.coverage_ledger
+    assert len(ledger_ok["listed_expiries"]) == 18
+    assert ledger_ok["required_expiries"] == ["2026-11-12", "2026-12-10"]
+    assert ledger_ok["priced_expiries"] == ["2026-11-12", "2026-12-10"]
+    dec10_cov = ledger_ok["by_expiry"]["2026-12-10"]
+    assert dec10_cov["counts"]["listed"] == 162
+    assert far_held_sym in dec10_cov["selected"]
+    assert far_held_sym in dec10_cov["requested"]
+    assert far_held_sym in dec10_cov["returned"]
+    assert far_held_sym in dec10_cov["priced"]
+    assert dec10_cov["counts"]["missing"] == 0
+    assert dec10_cov["counts"]["rejected"] == 0
+    assert state_ok.market_evidence.volatility_state.iv_source_label == "LIVE_VARIANCE_INTERPOLATED_CM30"
+    assert state_ok.final_output is not None and state_ok.final_output.is_live_ready is False
+    assert deliv_ok.alerted_trader is False
+
+    # 3B. Rejected away-from-ATM monitored leg -> NOT counted in `priced` -> INCOMPLETE_SURFACE_COVERAGE
+    #     and multi-expiry surface comparison is NOT certified!
+    q_rej_held = json.loads(json.dumps(quotes_by_tok))
+    q_rej_held["20261210_23500PE"]["depth"]["sell"] = [
+        {"price": "18.70", "quantity": "390"},
+        {"price": "18.25", "quantity": "585"},
+    ]
+    adp_rej, _ = _make_18exp_live_adapter(q_rej_held, tmp_path / "cache_3b")
+    state_rej, deliv_rej = run_analyst_pipeline(
+        dec_dt,
+        dataclasses.replace(
+            cfg_live,
+            cache_dir=str(tmp_path / "cache_3b"),
+            audit_log_path=str(tmp_path / "audit_3b.jsonl"),
+        ),
+        broker_adapter=adp_rej,
+        open_positions=[held_dec10],
+        force_render_for_inspection=True,
+    )
+    assert state_rej.run_metadata.surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE"
+    assert state_rej.run_metadata.uncovered_held_neo_symbols == [far_held_sym]
+    dec10_rej_cov = state_rej.run_metadata.coverage_ledger["by_expiry"]["2026-12-10"]
+    assert far_held_sym in dec10_rej_cov["listed"]
+    assert far_held_sym in dec10_rej_cov["rejected"]
+    assert far_held_sym not in dec10_rej_cov["priced"]
+    # Surface comparison MUST NOT be certified when required leg is unpriced
+    assert (
+        state_rej.market_evidence.volatility_state.iv_source_label
+        == "UNCERTIFIED_INCOMPLETE_SURFACE"
+    )
+    assert state_rej.market_evidence.volatility_state.term_structure_regime == "SINGLE_EXPIRY"
+    assert "INCOMPLETE_SURFACE_COVERAGE" in deliv_rej.full_report_markdown
+    assert state_rej.final_output is not None and state_rej.final_output.is_live_ready is False
+
+    # 3C. Missing requested quote AND failed required 2nd expiry both mark INCOMPLETE_SURFACE_COVERAGE
+    q_missing = json.loads(json.dumps(quotes_by_tok))
+    del q_missing["20261210_23500PE"]
+    adp_miss, _ = _make_18exp_live_adapter(q_missing, tmp_path / "cache_3c")
+    state_miss, _ = run_analyst_pipeline(
+        dec_dt,
+        dataclasses.replace(
+            cfg_live,
+            cache_dir=str(tmp_path / "cache_3c"),
+            audit_log_path=str(tmp_path / "audit_3c.jsonl"),
+        ),
+        broker_adapter=adp_miss,
+        open_positions=[held_dec10],
+    )
+    assert state_miss.run_metadata.surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE"
+    miss_cov = state_miss.run_metadata.coverage_ledger["by_expiry"]["2026-12-10"]
+    assert far_held_sym in miss_cov["missing"]
+    assert far_held_sym not in miss_cov["returned"]
+    assert far_held_sym not in miss_cov["priced"]
+    assert (
+        state_miss.market_evidence.volatility_state.iv_source_label
+        == "UNCERTIFIED_INCOMPLETE_SURFACE"
+    )
+
+    # Required 2nd comparison expiry fails Chain QA -> missing_required_expiries populated -> INCOMPLETE
+    adp_exp_fail, _ = _make_18exp_live_adapter(
+        quotes_by_tok, tmp_path / "cache_3d", fail_qa_on_exp="2026-11-19"
+    )
+    state_exp_fail, _ = run_analyst_pipeline(
+        dec_dt,
+        dataclasses.replace(
+            cfg_live,
+            cache_dir=str(tmp_path / "cache_3d"),
+            audit_log_path=str(tmp_path / "audit_3d.jsonl"),
+        ),
+        broker_adapter=adp_exp_fail,
+        open_positions=[],
+    )
+    assert state_exp_fail.run_metadata.surface_coverage_status == "INCOMPLETE_SURFACE_COVERAGE"
+    assert state_exp_fail.run_metadata.coverage_ledger["missing_required_expiries"] == [
+        "2026-11-19"
+    ]
+    assert (
+        state_exp_fail.market_evidence.volatility_state.iv_source_label
+        == "UNCERTIFIED_INCOMPLETE_SURFACE"
+    )
+
+
+def test_kotak_handoff_acceptance4_http_boundary_counts_shared_spacing_and_429_hard_stop(
+    tmp_path: Path,
+) -> None:
+    """Acceptance 4: Count actual HTTP GET requests at the transport boundary (distinct from
+    wrapper call count and cache hits), enforce strict >=2.5s shared spacing even under simulated
+    early OS sleep wakeups (2.499862s) and cross-process state, block non-GET methods, and
+    hard-stop immediately on synthetic HTTP 429 with zero retry.
+    """
+    from nifty_analyst.adapters.kotak_neo import (
+        KotakRateLimit429Error,
+        LiveKotakNeoAdapter,
+    )
+    from nifty_analyst.adapters.request_safety import SharedPacedHttpTransport
+
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    chains_by_exp, quotes_by_tok, exp_18 = _build_synthetic_multi_expiry_env(
+        spot=25000.0, mkt_lot=65, quote_lstup_epoch=1793940298
+    )
+    candles_by_ivl = _build_synthetic_candles_for_dec(dec_dt.date())
+
+    class _FakeReq:
+        def __init__(self, method: str, url: str) -> None:
+            self.method = method
+            self.url = url
+
+    class _FakeResp:
+        def __init__(self, status_code: int = 200) -> None:
+            self.status_code = status_code
+
+    class _WireTransport:
+        def __init__(self, fail_429_on_call: int | None = None) -> None:
+            self.wire_urls: list[str] = []
+            self.fail_429_on_call = fail_429_on_call
+
+        def handle_request(self, request: Any) -> _FakeResp:
+            self.wire_urls.append(f"{request.method} {request.url}")
+            if self.fail_429_on_call is not None and len(self.wire_urls) == self.fail_429_on_call:
+                return _FakeResp(status_code=429)
+            return _FakeResp(status_code=200)
+
+    # 4A. Compound wrapper HTTP counting + cache hit + early OS wakeup (2.499862s) strict >= 2.5s guard
+    mono_now = [0.0]
+    wall_now = [1_794_455_565.0]
+    sleep_calls: list[float] = []
+
+    def _early_wake_sleep(dur: float) -> None:
+        sleep_calls.append(dur)
+        if dur >= 2.0:
+            # Simulate exact live OS early wakeup: 2.499862s instead of 2.500000s (handoff line 67)
+            actual = dur - 0.000138
+        else:
+            actual = dur
+        mono_now[0] += actual
+        wall_now[0] += actual
+
+    wire_ok = _WireTransport()
+    pacer_ok = PacedReadTransport(
+        min_interval_seconds=2.5,
+        max_queue_wait_seconds=35.0,
+        cooldown_file_path=tmp_path / "cooldown_ok.json",
+        pacing_state_file_path=tmp_path / "pacing_state.json",
+        early_wake_guard_seconds=0.001,
+        clock_fn=lambda: mono_now[0],
+        wall_time_fn=lambda: wall_now[0],
+        sleep_fn=_early_wake_sleep,
+    )
+
+    class _RestHolder:
+        def __init__(self, tr: Any) -> None:
+            self._client = type("_HttpxCli", (), {"_transport": tr})()
+
+    class _HttpBoundClient:
+        def __init__(self, tr: Any) -> None:
+            self.api_client = type("_ApiCli", (), {"rest_client": _RestHolder(tr)})()
+
+        def quotes(self, instrument_tokens: list[dict[str, str]], quote_type: str = "all") -> list[dict[str, Any]]:
+            self.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", f"/script-details/1.0/quotes/neosymbol/batch/{quote_type}")
+            )
+            return [
+                quotes_by_tok[t["instrument_token"]]
+                for t in instrument_tokens
+                if t["instrument_token"] in quotes_by_tok
+            ]
+
+    cli_ok = _HttpBoundClient(wire_ok)
+
+    class _CompoundService:
+        def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            cli_ok.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", "/scrip-master/expiries")
+            )
+            return {"status": "OK", "expiries": list(exp_18[:3])}
+
+        def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            # Compound wrapper call: issues TWO internal HTTP GET requests (scripmaster + quotes)
+            cli_ok.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", "/futures/lookup")
+            )
+            cli_ok.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", "/futures/quotes")
+            )
+            return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+        def get_full_option_chain(self, symbol: str, expiry: str | None = None, **kw: Any) -> dict[str, Any]:
+            # Compound wrapper call: issues TWO internal HTTP GET requests (chain + underlying)
+            cli_ok.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", f"/option-chain/{expiry}")
+            )
+            cli_ok.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", f"/option-chain/{expiry}/spot")
+            )
+            return chains_by_exp[str(expiry or exp_18[0])]
+
+    adp = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+    adp._service = _CompoundService()
+    adp._auth = type("_A", (), {"require_authenticated_client": lambda self: (cli_ok, None, None)})()
+    adp.rate_limiter = pacer_ok
+    adp.enforce_schedule = True
+    adp.depth_strikes_each_side = 40
+    adp.quotes_batch_size = 4
+    adp.max_depth_tokens_per_expiry = 8
+    adp.extra_neo_symbols = ()
+    adp.trading_calendar = {}
+    adp._cache = {}
+
+    # 1st master fetch: 2 adapter calls (`expiries` = 1 GET, `futures_chain` = 2 GETs -> 3 HTTP GETs)
+    adp.fetch_contract_master_raw(dec_dt)
+    # 2nd master fetch: 2 adapter calls -> BOTH hit cache -> 0 new HTTP GETs!
+    adp.fetch_contract_master_raw(dec_dt)
+    # Option chain fetch (8 tokens / batch 4 = 2 quote batches):
+    # 1 chain wrapper call (2 GETs) + 2 quote batch calls (2 GETs) = 3 adapter calls, 4 HTTP GETs!
+    adp.fetch_option_chain_raw("2026-11-12", dec_dt)
+
+    assert isinstance(cli_ok.api_client.rest_client._client._transport, SharedPacedHttpTransport)
+    assert adp.adapter_call_count == 7  # 2 + 2 cached + 3
+    assert adp.cache_hit_count == 2
+    assert adp.http_request_count == 7  # 3 + 0 + 4 == len(wire_ok.wire_urls)
+    assert len(wire_ok.wire_urls) == 7
+    # Wrapper non-cached count (5) != actual HTTP GET count (7)!
+    assert (adp.adapter_call_count - adp.cache_hit_count) == 5
+    assert adp.http_request_count != (adp.adapter_call_count - adp.cache_hit_count)
+
+    # Every consecutive HTTP request start gap is strictly >= 2.500000s despite 2.499862s OS early wakeups!
+    ts_list = cli_ok.api_client.rest_client._client._transport.http_request_timestamps
+    assert len(ts_list) == 7
+    gaps = [ts_list[i] - ts_list[i - 1] for i in range(1, len(ts_list))]
+    assert all(g >= 2.5 for g in gaps), f"Expected strict >= 2.5s gaps, got {gaps}"
+
+    # Cross-process spacing via shared `pacing_state.json`: a second process starting 1.0s later waits >= 1.5s
+    proc2_pacer = PacedReadTransport(
+        min_interval_seconds=2.5,
+        max_queue_wait_seconds=35.0,
+        pacing_state_file_path=tmp_path / "pacing_state.json",
+        clock_fn=lambda: mono_now[0],
+        wall_time_fn=lambda: wall_now[0],
+        sleep_fn=_early_wake_sleep,
+    )
+    mono_now[0] += 1.0
+    wall_now[0] += 1.0
+    before_proc2 = mono_now[0]
+    proc2_pacer.wait_for_slot()
+    assert (mono_now[0] - before_proc2) >= 1.5
+
+    # Read-only transport blocks non-GET methods before touching the wire
+    with pytest.raises(PermissionError, match="non-GET"):
+        cli_ok.api_client.rest_client._client._transport.handle_request(
+            _FakeReq("POST", "/orders/place")
+        )
+    assert len(wire_ok.wire_urls) == 7
+
+    # 4B. Synthetic HTTP 429 inside multi-expiry pipeline -> immediate hard-stop, ZERO retry, persisted cooldown
+    wire_429 = _WireTransport(fail_429_on_call=4)
+    cooldown_429 = tmp_path / "cooldown_429.json"
+    pacer_429 = PacedReadTransport(
+        min_interval_seconds=0.0,
+        max_queue_wait_seconds=35.0,
+        cooldown_file_path=cooldown_429,
+        wall_time_fn=lambda: wall_now[0],
+        sleep_fn=lambda s: (_ for _ in ()).throw(AssertionError(f"Unexpected retry sleep {s}s on 429")),
+    )
+    cli_429 = _HttpBoundClient(wire_429)
+
+    class _Cli429Full(_HttpBoundClient):
+        def historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
+            self.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", f"/historical/{kwargs['interval']}")
+            )
+            return list(candles_by_ivl[kwargs["interval"]])
+
+    cli_429_full = _Cli429Full(wire_429)
+
+    class _Svc429:
+        def get_expiries(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            cli_429_full.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", "/scrip-master/expiries")
+            )
+            return {"status": "OK", "expiries": list(exp_18[:3])}
+
+        def get_futures_chain(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            cli_429_full.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", "/futures/quotes")
+            )
+            return {"status": "OK", "lot_size": 65, "nearest_futures_ltp": 25000.0}
+
+        def get_full_option_chain(self, symbol: str, expiry: str | None = None, **kw: Any) -> dict[str, Any]:
+            cli_429_full.api_client.rest_client._client._transport.handle_request(
+                _FakeReq("GET", f"/option-chain/{expiry}")
+            )
+            return chains_by_exp[str(expiry or exp_18[0])]
+
+    adp_429 = LiveKotakNeoAdapter.__new__(LiveKotakNeoAdapter)
+    adp_429._service = _Svc429()
+    adp_429._auth = type("_A", (), {"require_authenticated_client": lambda self: (cli_429_full, None, None)})()
+    adp_429.rate_limiter = pacer_429
+    adp_429.enforce_schedule = True
+    adp_429.depth_strikes_each_side = 40
+    adp_429.quotes_batch_size = 4
+    adp_429.max_depth_tokens_per_expiry = 8
+    adp_429.extra_neo_symbols = ()
+    adp_429.cache_dir = tmp_path / "cache_429"
+    adp_429.trading_calendar = {}
+    adp_429._quote_retry_sleep_fn = lambda s: (_ for _ in ()).throw(
+        AssertionError(f"429 MUST NOT trigger 30s quote retry sleep ({s}s)!")
+    )
+    adp_429._cache = {}
+
+    pos_file = tmp_path / "pos_429.json"
+    pos_file.write_text("[]", encoding="utf-8")
+    cfg_429 = AnalystConfig(
+        mode="LIVE_MORNING_SNAPSHOT",
+        fixtures_dir=str(FIXTURES_DIR),
+        open_positions_file=str(pos_file),
+        cache_dir=str(tmp_path / "cache_429"),
+        audit_log_path=str(tmp_path / "audit_429.jsonl"),
+    )
+    state_429, deliv_429 = run_analyst_pipeline(dec_dt, cfg_429, broker_adapter=adp_429)
+    assert state_429.final_output is not None
+    assert state_429.final_output.verdict == "INSUFFICIENT DATA"
+    assert "429" in state_429.final_output.research_only_reason
+    assert deliv_429.alerted_trader is False
+    # Stopped at exact 4th HTTP GET with ZERO retry or probing!
+    assert len(wire_429.wire_urls) == 4
+    assert adp_429.http_request_count == 4
+    assert cooldown_429.exists()
+
+    # Follow-up attempt during active cooldown refuses before issuing a 5th HTTP request
+    with pytest.raises(KotakRateLimit429Error, match="cooldown active"):
+        adp_429.fetch_option_chain_raw("2026-11-19", dec_dt)
+    assert len(wire_429.wire_urls) == 4
+
+
+def test_kotak_handoff_acceptance5_6_7_selection_binding_independent_regime_and_alerts_off(
+    tmp_path: Path,
+) -> None:
+    """Acceptance 5, 6 & 7: Final verified selection binds report/digest/audit/chart against
+    arbitrary generated prose, market regime stays independent of candidate pick (WAIT on conflict
+    or missing confirmation), and recommendations/live-readiness remain OFF.
+    """
+    dec_dt = dt.datetime(2026, 11, 6, 10, 15, 0, tzinfo=IST)
+    chart_dir = tmp_path / "charts_acc5"
+    audit_path = tmp_path / "audit_acc5.jsonl"
+    cfg_off = AnalystConfig(
+        mode="OFFLINE",
+        fixtures_dir=str(FIXTURES_DIR),
+        payoff_chart_dir=str(chart_dir),
+        audit_log_path=str(audit_path),
+    )
+
+    # 5. Non-first eligible candidate chosen while free-form prose attempts to inject bogus facts
+    baseline, _ = run_analyst_pipeline(dec_dt, dataclasses.replace(cfg_off, payoff_chart_dir=""))
+    pass_cands = [c for c in baseline.candidate_structures if c.part_a_overall_status == "PASS"]
+    assert len(pass_cands) >= 2
+    picked = pass_cands[1]
+
+    def _inject_valid_id_with_clean_citations_and_prose_attempt(
+        base_resp: LLMSynthesisResponse,
+        st: NiftyOptionsState,
+        prim: Any,
+        alts: list[Any],
+    ) -> LLMSynthesisResponse:
+        rebuilt = OfflineDeterministicSynthesisProvider().synthesize(
+            sanitised_state_json="{}",
+            state=st,
+            primary=picked,
+            alternatives=[c for c in st.candidate_structures if c.structure_id != picked.structure_id],
+        )
+        # Attempt to smuggle unverified narrative wording ("guaranteed edge") -> caught by verifier -> WAIT!
+        return dataclasses.replace(
+            rebuilt,
+            reasoning_summary=rebuilt.reasoning_summary + " This trade is guaranteed profitable.",
+        )
+
+    st_blocked, deliv_blocked = run_analyst_pipeline(
+        dec_dt,
+        cfg_off,
+        llm_provider=_StaticOverrideProvider(_inject_valid_id_with_clean_citations_and_prose_attempt),
+        force_render_for_inspection=True,
+    )
+    assert st_blocked.final_output is not None
+    assert st_blocked.final_output.verdict == "WAIT"
+    assert st_blocked.final_output.primary_proposal is None
+    assert "guaranteed profitable" not in deliv_blocked.full_report_markdown.lower()
+    assert "guaranteed profitable" not in st_blocked.final_output.whatsapp_digest.lower()
+    assert deliv_blocked.alerted_trader is False
+
+    # Clean non-first pick binds consistently across report, digest, chart filename, and audit log
+    def _select_second_clean(
+        base_resp: LLMSynthesisResponse,
+        st: NiftyOptionsState,
+        prim: Any,
+        alts: list[Any],
+    ) -> LLMSynthesisResponse:
+        return OfflineDeterministicSynthesisProvider().synthesize(
+            sanitised_state_json="{}",
+            state=st,
+            primary=picked,
+            alternatives=[c for c in st.candidate_structures if c.structure_id != picked.structure_id],
+        )
+
+    st_bound, deliv_bound = run_analyst_pipeline(
+        dec_dt,
+        cfg_off,
+        llm_provider=_StaticOverrideProvider(_select_second_clean),
+        force_render_for_inspection=True,
+        suppress_trader_alerts=True,
+    )
+    assert st_bound.final_output is not None
+    assert st_bound.final_output.verdict == "SUGGESTION"
+    assert st_bound.final_output.primary_proposal is not None
+    assert st_bound.final_output.primary_proposal.structure_id == picked.structure_id
+    assert picked.structure_id in st_bound.final_output.whatsapp_digest
+    assert picked.structure_id in deliv_bound.full_report_markdown
+    if st_bound.final_output.payoff_diagram_path:
+        assert picked.structure_id in Path(st_bound.final_output.payoff_diagram_path).name
+    audit_last = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert (
+        audit_last["final_output"]["primary_proposal"]["structure_id"]
+        == picked.structure_id
+    )
+    assert deliv_bound.alerted_trader is False
+
+    # 7. Live mode keeps `is_live_ready=False` and `suppress_trader_alerts=True` default
+    sig_slot = inspect.signature(run_scheduled_slot)
+    assert sig_slot.parameters["suppress_trader_alerts"].default is True
+
+
+
 

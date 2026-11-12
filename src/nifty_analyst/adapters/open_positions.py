@@ -157,6 +157,7 @@ def load_open_positions(
                         if seg and tok:
                             neo_syms.append(f"{seg}|{tok}")
 
+            exp_date = str(item.get("expiry_date") or "").strip()
             parsed.append(
                 OpenPosition(
                     position_id=pos_id,
@@ -167,6 +168,7 @@ def load_open_positions(
                     short_leg_deltas=deltas,
                     dte_trading_sessions=dte,
                     neo_symbols=neo_syms,
+                    expiry_date=exp_date,
                 )
             )
     except Exception as exc:

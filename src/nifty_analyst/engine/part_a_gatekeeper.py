@@ -14,6 +14,7 @@ Enforces:
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 from typing import Sequence
 
@@ -236,7 +237,7 @@ def evaluate_part_a_rules(
         ),
     )
 
-    # Rule 8: IVP and liquidity gates (mandatory for live readiness)
+    # Rule 8: IVP, per-leg liquidity, and multi-leg timestamp synchronization gates
     failed_liq_legs = [
         leg
         for leg in legs
@@ -247,12 +248,47 @@ def evaluate_part_a_rules(
             or leg.top_book_depth_lots < config.min_top_book_depth_lots
         )
     ]
+    leg_dts: list[dt.datetime] = []
+    missing_or_bad_leg_ts = False
+    for leg in legs:
+        ts_raw = (leg.quote_timestamp_ist or "").strip()
+        if not ts_raw:
+            missing_or_bad_leg_ts = True
+            break
+        try:
+            parsed_leg_dt = dt.datetime.fromisoformat(ts_raw)
+            if parsed_leg_dt.tzinfo is None or parsed_leg_dt.utcoffset() is None:
+                missing_or_bad_leg_ts = True
+                break
+            leg_dts.append(parsed_leg_dt)
+        except ValueError:
+            missing_or_bad_leg_ts = True
+            break
+    leg_ts_skew_sec = (
+        (max(leg_dts) - min(leg_dts)).total_seconds() if len(leg_dts) >= 2 else 0.0
+    )
+    max_skew_cfg = float(getattr(config, "max_leg_timestamp_skew_seconds", 30.0))
+    leg_ts_disagreement = missing_or_bad_leg_ts or (leg_ts_skew_sec > max_skew_cfg)
+
     ivp_unknown = (
         volatility.ivp_30d == "UNKNOWN"
         or volatility.ivp_90d == "UNKNOWN"
     )
-    if failed_liq_legs or not volatility.chain_qa_passed:
+    if leg_ts_disagreement:
         r8_status: RuleStatus = "FAIL"
+        r8_ev = (
+            "LEG_TIMESTAMP_DISAGREEMENT: "
+            + (
+                "missing or timezone-naive per-leg quote_timestamp_ist."
+                if missing_or_bad_leg_ts
+                else (
+                    f"multi-leg quote timestamps diverge by {leg_ts_skew_sec:.2f}s > "
+                    f"max_leg_timestamp_skew_seconds={max_skew_cfg:.2f}s."
+                )
+            )
+        )
+    elif failed_liq_legs or not volatility.chain_qa_passed:
+        r8_status = "FAIL"
         r8_ev = (
             f"chain_qa_passed={volatility.chain_qa_passed}, "
             f"failed_liquidity_legs={[f'{l.strike}{l.option_type}' for l in failed_liq_legs]}."

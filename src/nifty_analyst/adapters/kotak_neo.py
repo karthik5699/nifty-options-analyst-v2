@@ -21,17 +21,21 @@ from __future__ import annotations
 import abc
 import datetime as dt
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from nifty_analyst.adapters.request_safety import (
+    HttpRateLimit429Error,
     PacedCooldownActiveError,
     PacedQueueCapExceededError,
     PacedReadTransport,
+    SharedPacedHttpTransport,
     chunk_date_range,
     interpret_depth_book,
+    normalize_contract_quote_timestamp,
     validate_history,
     validate_quotes_batch,
 )
@@ -73,6 +77,9 @@ class ChainSnapshotEnvelope:
     rejected_depth_books: list[dict[str, Any]] = field(default_factory=list)
     priced_neo_symbols: list[str] = field(default_factory=list)
     chain_neo_symbols: list[str] = field(default_factory=list)
+    fetch_started_at_ist: str = ""
+    fetch_completed_at_ist: str = ""
+    coverage_ledger: dict[str, Any] = field(default_factory=dict)
 
 
 class ProvisionalSerialRateLimiter:
@@ -330,7 +337,11 @@ def parse_and_validate_option_chain(
 
     for item in strikes_raw:
         strike_val = float(item["strike"])
+        c_asof = str(item.get("call_quote_as_of_ist") or "").strip()
+        p_asof = str(item.get("put_quote_as_of_ist") or "").strip()
         ts_str = str(item.get("update_time_ist", "")).strip()
+        if not ts_str and (c_asof or p_asof):
+            ts_str = c_asof or p_asof
         if not ts_str:
             raise MissingQuoteTimestampError(
                 f"Option quote at strike {strike_val} (expiry {expiry_date}) is missing "
@@ -339,8 +350,26 @@ def parse_and_validate_option_chain(
         quote_dt = ensure_ist(dt.datetime.fromisoformat(ts_str))
         quote_times.append(quote_dt)
 
+        strike_is_stale = False
         age_sec = (dec_ist - quote_dt).total_seconds()
         if age_sec > max_staleness_seconds or age_sec < -5.0:
+            strike_is_stale = True
+
+        c_quote_iso = ""
+        p_quote_iso = ""
+        for side_iso, target_side in ((c_asof, "CE"), (p_asof, "PE")):
+            if side_iso:
+                side_dt = ensure_ist(dt.datetime.fromisoformat(side_iso))
+                quote_times.append(side_dt)
+                side_age = (dec_ist - side_dt).total_seconds()
+                if side_age > max_staleness_seconds or side_age < -5.0:
+                    strike_is_stale = True
+                if target_side == "CE":
+                    c_quote_iso = side_dt.isoformat()
+                else:
+                    p_quote_iso = side_dt.isoformat()
+
+        if strike_is_stale:
             stale_strikes.append(strike_val)
 
         c_bid, c_ask = _coerce_executable_pair(
@@ -368,6 +397,9 @@ def parse_and_validate_option_chain(
                 if isinstance(r, (list, tuple)) and len(r) >= 2:
                     out_lvls.append((float(r[0]), int(r[1])))
             return tuple(out_lvls)
+
+        c_prov = item.get("call_ts_provenance") if isinstance(item.get("call_ts_provenance"), dict) else {}
+        p_prov = item.get("put_ts_provenance") if isinstance(item.get("put_ts_provenance"), dict) else {}
 
         parsed_quotes.append(
             RawStrikeQuote(
@@ -400,13 +432,20 @@ def parse_and_validate_option_chain(
                 call_sell_levels=_opt_levels("call_sell_levels", c_exec),
                 put_buy_levels=_opt_levels("put_buy_levels", p_exec),
                 put_sell_levels=_opt_levels("put_sell_levels", p_exec),
+                call_quote_timestamp_ist=c_quote_iso,
+                put_quote_timestamp_ist=p_quote_iso,
+                fetch_started_at_ist=str(item.get("fetch_started_at_ist") or raw_chain.get("fetch_started_at_ist") or ""),
+                fetch_completed_at_ist=str(item.get("fetch_completed_at_ist") or raw_chain.get("fetch_completed_at_ist") or ""),
+                call_ts_semantics=str(c_prov.get("semantics_status") or ""),
+                put_ts_semantics=str(p_prov.get("semantics_status") or ""),
             )
         )
 
     earliest = min(quote_times).isoformat()
     latest = max(quote_times).isoformat()
     tag = str(raw_chain.get("verification_tag", "UNVERIFIED_KOTAK_SCHEMA"))
-    if ts_sources != {"EXCHANGE"}:
+    verified_only_sources = {"EXCHANGE", "VERIFIED_CONTRACT_QUOTE_AS_OF"}
+    if not ts_sources.issubset(verified_only_sources):
         tag = tag + "|TS_" + "+".join(sorted(ts_sources))
 
     raw_lot = raw_chain.get("lot_size")
@@ -414,6 +453,29 @@ def parse_and_validate_option_chain(
     rejected_books = list(raw_chain.get("rejected_depth_books") or [])
     priced_neos = [str(s) for s in (raw_chain.get("priced_neo_symbols") or [])]
     chain_neos = [str(s) for s in (raw_chain.get("chain_neo_symbols") or [])]
+    cov_ledger = dict(raw_chain.get("coverage_ledger") or {})
+    if not cov_ledger:
+        priced_fallback = list(priced_neos)
+        listed_fallback = list(chain_neos)
+        cov_ledger = {
+            "expiry_date": expiry_date,
+            "listed": listed_fallback,
+            "selected": list(raw_chain.get("shortlisted_neo_symbols") or priced_fallback),
+            "requested": list(raw_chain.get("requested_neo_symbols") or priced_fallback),
+            "returned": list(raw_chain.get("returned_neo_symbols") or priced_fallback),
+            "missing": list(raw_chain.get("missing_neo_symbols") or []),
+            "rejected": [str(r.get("neo_symbol") or "") for r in rejected_books if r.get("neo_symbol")],
+            "priced": priced_fallback,
+            "counts": {
+                "listed": len(listed_fallback),
+                "selected": len(raw_chain.get("shortlisted_neo_symbols") or priced_fallback),
+                "requested": len(raw_chain.get("requested_neo_symbols") or priced_fallback),
+                "returned": len(raw_chain.get("returned_neo_symbols") or priced_fallback),
+                "missing": len(raw_chain.get("missing_neo_symbols") or []),
+                "rejected": len(rejected_books),
+                "priced": len(priced_fallback),
+            },
+        }
 
     return ChainSnapshotEnvelope(
         expiry_date=expiry_date,
@@ -427,6 +489,9 @@ def parse_and_validate_option_chain(
         rejected_depth_books=rejected_books,
         priced_neo_symbols=priced_neos,
         chain_neo_symbols=chain_neos,
+        fetch_started_at_ist=str(raw_chain.get("fetch_started_at_ist") or ""),
+        fetch_completed_at_ist=str(raw_chain.get("fetch_completed_at_ist") or ""),
+        coverage_ledger=cov_ledger,
     )
 
 
@@ -663,12 +728,6 @@ def _select_target_depth_neosymbols(
     selected: list[str] = []
     seen: set[str] = set()
 
-    def _add(ns: Any) -> None:
-        s = str(ns or "").strip()
-        if s and "|" in s and s not in seen and len(selected) < max_tokens:
-            seen.add(s)
-            selected.append(s)
-
     chain_neos: set[str] = set()
     by_strike: dict[float, dict[str, Any]] = {}
     for row in strikes_raw:
@@ -681,10 +740,31 @@ def _select_target_depth_neosymbols(
             if ns and "|" in str(ns):
                 chain_neos.add(str(ns).strip())
 
-    # 1. Held open-position tokens belonging to this chain
+    # Required monitored open-position contracts belonging to this chain are ALWAYS included
+    # even when away from ATM, without starving the 3 near-ATM parity pairs (6 tokens).
+    required_on_chain: list[str] = []
+    req_seen: set[str] = set()
     for ns in extra_neo_symbols:
-        if ns in chain_neos:
-            _add(ns)
+        s_req = str(ns or "").strip()
+        if s_req in chain_neos and s_req not in req_seen:
+            req_seen.add(s_req)
+            required_on_chain.append(s_req)
+
+    effective_cap = (
+        max(int(max_tokens), len(required_on_chain) + 6)
+        if required_on_chain
+        else int(max_tokens)
+    )
+
+    def _add(ns: Any) -> None:
+        s = str(ns or "").strip()
+        if s and "|" in s and s not in seen and len(selected) < effective_cap:
+            seen.add(s)
+            selected.append(s)
+
+    # 1. Held open-position tokens belonging to this chain
+    for ns in required_on_chain:
+        _add(ns)
 
     if not by_strike:
         return selected
@@ -812,10 +892,16 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         cooldown_file = (
             self.cache_dir / "kotak_429_cooldown.json" if self.cache_dir is not None else None
         )
+        pacing_state_file = (
+            self.cache_dir / "kotak_pacing_state.json" if self.cache_dir is not None else None
+        )
         self.rate_limiter = rate_limiter or PacedReadTransport(
             min_interval_seconds=2.5,
             max_queue_wait_seconds=35.0,
             cooldown_file_path=cooldown_file,
+            pacing_state_file_path=pacing_state_file,
+            strict_guard_seconds=0.0,
+            early_wake_guard_seconds=0.001,
         )
         self.enforce_schedule = enforce_schedule_in_live_mode
         self.depth_strikes_each_side = depth_strikes_each_side
@@ -823,9 +909,57 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         self.max_depth_tokens_per_expiry = max(4, int(max_depth_tokens_per_expiry))
         self.extra_neo_symbols = tuple(extra_neo_symbols)
         self.trading_calendar = trading_calendar or {}
+        self.quote_ts_semantics_verified: bool = False
+        self.require_contract_quote_timestamp: bool = False
+        self.max_quote_staleness_seconds: float = 180.0
+        self.max_future_skew_seconds: float = 5.0
+        self._http_transport: SharedPacedHttpTransport | None = None
+        self.adapter_call_count: int = 0
+        self.cache_hit_count: int = 0
         self._cache: dict[str, Any] = {}
 
     # ----- plumbing -----
+
+    def _now_ist(self) -> dt.datetime:
+        fn = getattr(self, "_wall_clock_ist_fn", None)
+        if callable(fn):
+            return ensure_ist(fn())
+        return dt.datetime.now(tz=IST)
+
+    def _maybe_attach_http_boundary_transport(self, client: Any) -> None:
+        """Attach SharedPacedHttpTransport onto an authenticated NeoAPI httpx client if present."""
+        if not isinstance(getattr(self, "rate_limiter", None), PacedReadTransport):
+            return
+        candidates: list[tuple[Any, str]] = []
+        api_cli = getattr(client, "api_client", None)
+        rest_cli = getattr(api_cli, "rest_client", None) if api_cli is not None else None
+        httpx_cli = getattr(rest_cli, "_client", None) if rest_cli is not None else None
+        if httpx_cli is not None and hasattr(httpx_cli, "_transport"):
+            candidates.append((httpx_cli, "_transport"))
+        if hasattr(client, "_transport"):
+            candidates.append((client, "_transport"))
+        for holder, attr in candidates:
+            cur_tr = getattr(holder, attr, None)
+            if cur_tr is None or not hasattr(cur_tr, "handle_request"):
+                continue
+            if isinstance(cur_tr, SharedPacedHttpTransport):
+                self._http_transport = cur_tr
+                return
+            wrapped = SharedPacedHttpTransport(cur_tr, self.rate_limiter)
+            setattr(holder, attr, wrapped)
+            self._http_transport = wrapped
+            return
+
+    @property
+    def http_request_count(self) -> int:
+        tr = getattr(self, "_http_transport", None)
+        if tr is not None:
+            return int(tr.http_request_count)
+        lim = getattr(self, "rate_limiter", None)
+        http_c = int(getattr(lim, "http_request_count", 0) or 0)
+        if http_c > 0 or getattr(lim, "http_boundary_attached", False):
+            return http_c
+        return int(getattr(lim, "request_count", 0) or 0)
 
     def _assert_schedule_approved(self, decision_dt_ist: dt.datetime) -> dt.datetime:
         dec_ist = ensure_ist(decision_dt_ist)
@@ -845,7 +979,12 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         self._assert_schedule_approved(decision_dt_ist)
         if cache_key not in self._cache:
             try:
-                self.rate_limiter.wait_for_slot()
+                if getattr(self.rate_limiter, "http_boundary_attached", False):
+                    chk = getattr(self.rate_limiter, "check_persisted_429_cooldown", None)
+                    if callable(chk):
+                        chk()
+                else:
+                    self.rate_limiter.wait_for_slot()
             except PacedCooldownActiveError as exc:
                 raise KotakRateLimit429Error(str(exc)) from exc
             except PacedQueueCapExceededError as exc:
@@ -857,13 +996,29 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             rec_fn(reason)
 
     def _call(self, cache_key: str, decision_dt_ist: dt.datetime, fn: Callable[[], Any]) -> Any:
+        self.adapter_call_count = int(getattr(self, "adapter_call_count", 0)) + 1
+        try:
+            auth_obj = getattr(self, "_auth", None)
+            if auth_obj is not None and hasattr(auth_obj, "require_authenticated_client"):
+                cli_peek, _, _ = auth_obj.require_authenticated_client()
+                self._maybe_attach_http_boundary_transport(cli_peek)
+        except Exception:
+            pass
+
         self._guard_request(cache_key, decision_dt_ist)
         if cache_key in self._cache:
+            self.cache_hit_count = int(getattr(self, "cache_hit_count", 0)) + 1
             return self._cache[cache_key]
         try:
             resp = fn()
         except KotakAdapterError:
             raise
+        except HttpRateLimit429Error as exc:
+            raise KotakRateLimit429Error(str(exc)) from exc
+        except PacedCooldownActiveError as exc:
+            raise KotakRateLimit429Error(str(exc)) from exc
+        except PacedQueueCapExceededError as exc:
+            raise KotakAdapterError(str(exc)) from exc
         except Exception as exc:
             msg = str(exc)
             if "429" in msg or "too many" in msg.lower():
@@ -1076,8 +1231,10 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         expiry_date: str,
         decision_dt_ist: dt.datetime,
         fetch_depth: bool = True,
+        max_depth_tokens_override: int | None = None,
     ) -> dict[str, Any]:
         dec_ist = ensure_ist(decision_dt_ist)
+        fetch_started_dt = self._now_ist()
         strike_count = int(getattr(self, "depth_strikes_each_side", 40))
         # Never pass include_depth=True: OptionChainService._fetch_depth_by_neosymbol uses
         # 25-token batches with 0.04s sleep and swallows 400/429 exceptions.
@@ -1100,14 +1257,27 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             expiry_lot_size = int(fut_cached.get("lot_size") or 0)
 
         underlying_info = resp.get("underlying_prices") if isinstance(resp.get("underlying_prices"), dict) else {}
-        ref_price = float(
+        base_ref = float(
             underlying_info.get("reference_price")
-            or underlying_info.get("futures_price")
             or underlying_info.get("spot_price")
+            or underlying_info.get("futures_price")
             or 0.0
         )
+        fut_ref = float(underlying_info.get("futures_price") or 0.0)
+        if fut_ref <= 0.0 and base_ref > 0.0:
+            try:
+                dte_d = max(0, (dt.date.fromisoformat(expiry_date) - dec_ist.date()).days)
+                fut_ref = base_ref * math.exp(0.0675 * (dte_d / 365.0))
+            except ValueError:
+                fut_ref = base_ref
+        # Shift shortlist center to forward when forward carry exceeds 1 strike interval (> 50 pts)
+        ref_price = fut_ref if (fut_ref > 0.0 and abs(fut_ref - base_ref) > 50.0) else base_ref
 
-        max_tokens = int(getattr(self, "max_depth_tokens_per_expiry", 12))
+        max_tokens = (
+            int(max_depth_tokens_override)
+            if max_depth_tokens_override is not None
+            else int(getattr(self, "max_depth_tokens_per_expiry", 12))
+        )
         extra_neos = tuple(getattr(self, "extra_neo_symbols", ()))
         shortlisted_neos = (
             _select_target_depth_neosymbols(
@@ -1119,12 +1289,20 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             if fetch_depth
             else []
         )
-        shortlisted_set = set(shortlisted_neos)
+
+        client_obj, _, _ = self._auth.require_authenticated_client()
+        client_supports_quotes = bool(shortlisted_neos and hasattr(client_obj, "quotes"))
+        requested_neos: list[str] = list(shortlisted_neos) if client_supports_quotes else []
+        requested_set = set(requested_neos)
+
         quotes_map, failed_quote_errors = (
-            self._fetch_targeted_quotes_by_neosymbol(shortlisted_neos, expiry_date, dec_ist)
-            if shortlisted_neos
+            self._fetch_targeted_quotes_by_neosymbol(requested_neos, expiry_date, dec_ist)
+            if requested_neos
             else ({}, {})
         )
+        fetch_completed_dt = self._now_ist()
+        if fetch_completed_dt < fetch_started_dt:
+            fetch_completed_dt = fetch_started_dt
 
         if quotes_map and expiry_lot_size <= 0:
             # Check if any quote payload itself carries mktLot
@@ -1139,9 +1317,19 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     "cannot convert raw depth quantities to lots."
                 )
 
+        ts_semantics_verified = bool(getattr(self, "quote_ts_semantics_verified", False))
+        require_contract_ts = (
+            bool(getattr(self, "require_contract_quote_timestamp", False)) or ts_semantics_verified
+        )
+        max_stale_sec = float(getattr(self, "max_quote_staleness_seconds", 180.0))
+        max_future_sec = float(getattr(self, "max_future_skew_seconds", 5.0))
+
         resolved_contract_lots: set[int] = set()
         rejected_depth_books: list[dict[str, Any]] = []
         priced_neo_symbols: list[str] = []
+        returned_neo_symbols: list[str] = []
+        missing_neo_symbols: list[str] = []
+        rejected_neo_symbols: list[str] = []
         all_chain_neo_symbols: list[str] = []
         strikes: list[dict[str, Any]] = []
 
@@ -1153,6 +1341,9 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
             "buy_levels": [],
             "sell_levels": [],
             "quote_response_ts_candidates": {},
+            "quote_as_of_ist": None,
+            "ts_semantics": "",
+            "ts_provenance": {},
         }
 
         def _extract_quote_ts_candidates(q_obj: dict[str, Any] | None) -> dict[str, str]:
@@ -1160,6 +1351,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 return {}
             found_ts: dict[str, str] = {}
             for k_ts in (
+                "quote_as_of_ist",
+                "book_update_time_ist",
                 "exchange_timestamp_ist",
                 "exchange_timestamp",
                 "last_traded_time",
@@ -1183,8 +1376,9 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 all_chain_neo_symbols.append(ns)
             tok_only = ns.split("|", 1)[1].strip() if "|" in ns else ""
 
-            if ns and ns in shortlisted_set:
+            if ns and ns in requested_set:
                 if ns in failed_quote_errors:
+                    missing_neo_symbols.append(ns)
                     rejected_depth_books.append(
                         {
                             "expiry_date": expiry_date,
@@ -1196,33 +1390,46 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                         }
                     )
                     return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
-                q_payload = quotes_map.get(ns) or (quotes_map.get(tok_only) if tok_only else None)
-                if q_payload is not None or quotes_map:
-                    parsed_book = interpret_depth_book(q_payload, fallback_lot_size=expiry_lot_size)
-                    q_ts_cands = _extract_quote_ts_candidates(q_payload)
-                    if parsed_book.is_structurally_valid:
-                        resolved_contract_lots.add(parsed_book.resolved_lot_size)
-                        priced_neo_symbols.append(ns)
-                        b_lots = parsed_book.bid_depth_lots or 0
-                        a_lots = parsed_book.ask_depth_lots or 0
-                        conservative_lots = min(b_lots, a_lots) if (b_lots and a_lots) else (b_lots or a_lots)
-                        return (
-                            parsed_book.best_bid,
-                            parsed_book.best_ask,
-                            conservative_lots,
-                            parsed_book.bid_depth_lots,
-                            parsed_book.ask_depth_lots,
-                            False,
-                            {
-                                "touch_bid_qty": parsed_book.touch_bid_qty,
-                                "touch_ask_qty": parsed_book.touch_ask_qty,
-                                "visible_buy_qty": parsed_book.visible_buy_qty,
-                                "visible_sell_qty": parsed_book.visible_sell_qty,
-                                "buy_levels": [[p, q] for p, q in parsed_book.buy_levels],
-                                "sell_levels": [[p, q] for p, q in parsed_book.sell_levels],
-                                "quote_response_ts_candidates": q_ts_cands,
-                            },
-                        )
+
+                q_payload = quotes_map.get(ns)
+                if q_payload is None and tok_only:
+                    q_payload = quotes_map.get(tok_only)
+
+                if q_payload is None:
+                    missing_neo_symbols.append(ns)
+                    rejected_depth_books.append(
+                        {
+                            "expiry_date": expiry_date,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "neo_symbol": ns,
+                            "rejection_reason": "MISSING_FROM_QUOTES_RESPONSE",
+                            "raw_payload": None,
+                        }
+                    )
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
+
+                returned_neo_symbols.append(ns)
+                q_ts_cands = _extract_quote_ts_candidates(q_payload)
+                ts_eval = normalize_contract_quote_timestamp(
+                    q_payload,
+                    dec_ist,
+                    max_staleness_seconds=max_stale_sec,
+                    max_future_skew_seconds=max_future_sec,
+                    verified_semantics=ts_semantics_verified,
+                    require_present=require_contract_ts,
+                )
+                ts_prov = {
+                    "raw_value": ts_eval.raw_value,
+                    "source_field": ts_eval.source_field,
+                    "detected_unit": ts_eval.detected_unit,
+                    "semantics_status": ts_eval.semantics_status,
+                    "normalized_quote_as_of_ist": ts_eval.normalized_quote_as_of_ist,
+                    "rejection_reason": ts_eval.rejection_reason,
+                }
+                parsed_book = interpret_depth_book(q_payload, fallback_lot_size=expiry_lot_size)
+                if not parsed_book.is_structurally_valid:
+                    rejected_neo_symbols.append(ns)
                     rejected_depth_books.append(
                         {
                             "expiry_date": expiry_date,
@@ -1231,9 +1438,57 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             "neo_symbol": ns,
                             "rejection_reason": parsed_book.rejection_reason,
                             "raw_payload": parsed_book.raw_payload,
+                            "ts_provenance": ts_prov,
                         }
                     )
-                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), dict(_EMPTY_EXT)
+                    ext_rej = dict(_EMPTY_EXT)
+                    ext_rej["quote_response_ts_candidates"] = q_ts_cands
+                    ext_rej["ts_provenance"] = ts_prov
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), ext_rej
+
+                if not ts_eval.is_valid:
+                    rejected_neo_symbols.append(ns)
+                    rejected_depth_books.append(
+                        {
+                            "expiry_date": expiry_date,
+                            "strike": strike_val,
+                            "option_type": opt_type,
+                            "neo_symbol": ns,
+                            "rejection_reason": ts_eval.rejection_reason,
+                            "raw_payload": dict(q_payload),
+                            "ts_provenance": ts_prov,
+                        }
+                    )
+                    ext_ts_rej = dict(_EMPTY_EXT)
+                    ext_ts_rej["quote_response_ts_candidates"] = q_ts_cands
+                    ext_ts_rej["ts_provenance"] = ts_prov
+                    return None, None, 0, None, None, bool(leg.get("ltp") is not None), ext_ts_rej
+
+                resolved_contract_lots.add(parsed_book.resolved_lot_size)
+                priced_neo_symbols.append(ns)
+                b_lots = parsed_book.bid_depth_lots or 0
+                a_lots = parsed_book.ask_depth_lots or 0
+                conservative_lots = min(b_lots, a_lots) if (b_lots and a_lots) else (b_lots or a_lots)
+                return (
+                    parsed_book.best_bid,
+                    parsed_book.best_ask,
+                    conservative_lots,
+                    parsed_book.bid_depth_lots,
+                    parsed_book.ask_depth_lots,
+                    False,
+                    {
+                        "touch_bid_qty": parsed_book.touch_bid_qty,
+                        "touch_ask_qty": parsed_book.touch_ask_qty,
+                        "visible_buy_qty": parsed_book.visible_buy_qty,
+                        "visible_sell_qty": parsed_book.visible_sell_qty,
+                        "buy_levels": [[p, q] for p, q in parsed_book.buy_levels],
+                        "sell_levels": [[p, q] for p, q in parsed_book.sell_levels],
+                        "quote_response_ts_candidates": q_ts_cands,
+                        "quote_as_of_ist": ts_eval.normalized_quote_as_of_ist,
+                        "ts_semantics": ts_eval.semantics_status,
+                        "ts_provenance": ts_prov,
+                    },
+                )
 
             # Support synthetic unit-test chain payloads that embed pre-normalized `market_depth` / `depth`
             inline_md = leg.get("market_depth") or leg.get("depth")
@@ -1264,8 +1519,13 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                                 "buy_levels": [[p, q] for p, q in parsed_inline.buy_levels],
                                 "sell_levels": [[p, q] for p, q in parsed_inline.sell_levels],
                                 "quote_response_ts_candidates": {},
+                                "quote_as_of_ist": None,
+                                "ts_semantics": "",
+                                "ts_provenance": {},
                             },
                         )
+                    if ns:
+                        rejected_neo_symbols.append(ns)
                     rejected_depth_books.append(
                         {
                             "expiry_date": expiry_date,
@@ -1282,6 +1542,8 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     inline_md.get("best_bid"), inline_md.get("best_ask"), False
                 )
                 if b_val is not None and a_val is not None:
+                    if ns:
+                        priced_neo_symbols.append(ns)
                     lot_div = expiry_lot_size if expiry_lot_size > 0 else 1
                     vis_b = int(inline_md["total_buy_qty"]) if inline_md.get("total_buy_qty") is not None else None
                     vis_s = int(inline_md["total_sell_qty"]) if inline_md.get("total_sell_qty") is not None else None
@@ -1317,9 +1579,14 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                             "buy_levels": [],
                             "sell_levels": [],
                             "quote_response_ts_candidates": {},
+                            "quote_as_of_ist": None,
+                            "ts_semantics": "",
+                            "ts_provenance": {},
                         },
                     )
 
+                if ns:
+                    rejected_neo_symbols.append(ns)
                 rejected_depth_books.append(
                     {
                         "expiry_date": expiry_date,
@@ -1364,6 +1631,27 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                 for k_ts, v_ts in ext_ts.items():
                     ts_candidates[f"{side_lbl}.{k_ts}"] = v_ts
 
+            c_as_of = c_ext["quote_as_of_ist"]
+            p_as_of = p_ext["quote_as_of_ist"]
+            present_as_ofs = [x for x in (c_as_of, p_as_of) if x]
+            present_sems = {
+                s for s in (c_ext["ts_semantics"], p_ext["ts_semantics"]) if s
+            }
+            if present_as_ofs:
+                strike_update_iso = min(present_as_ofs)
+                if present_sems == {"VERIFIED_CONTRACT_QUOTE_AS_OF"} and (
+                    (c_bid is None or c_as_of is not None)
+                    and (p_bid is None or p_as_of is not None)
+                ):
+                    strike_ts_source = "VERIFIED_CONTRACT_QUOTE_AS_OF"
+                elif "UNVERIFIED_KOTAK_REST_LSTUP_TIME" in present_sems:
+                    strike_ts_source = "UNVERIFIED_KOTAK_REST_LSTUP_TIME"
+                else:
+                    strike_ts_source = "UNVERIFIED_CANDIDATE_FIELD"
+            else:
+                strike_update_iso = dec_ist.isoformat()
+                strike_ts_source = "FETCH_TIME_NOT_EXCHANGE"
+
             strikes.append(
                 {
                     "strike": strike_val,
@@ -1395,8 +1683,14 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
                     "put_sell_levels": p_ext["sell_levels"],
                     "call_ltp_only": ce_ltp_only,
                     "put_ltp_only": pe_ltp_only,
-                    "update_time_ist": dec_ist.isoformat(),
-                    "quote_ts_source": "FETCH_TIME_NOT_EXCHANGE",
+                    "fetch_started_at_ist": fetch_started_dt.isoformat(),
+                    "fetch_completed_at_ist": fetch_completed_dt.isoformat(),
+                    "call_quote_as_of_ist": c_as_of,
+                    "put_quote_as_of_ist": p_as_of,
+                    "call_ts_provenance": c_ext["ts_provenance"],
+                    "put_ts_provenance": p_ext["ts_provenance"],
+                    "update_time_ist": strike_update_iso,
+                    "quote_ts_source": strike_ts_source,
                     "exchange_ts_candidates": ts_candidates,
                 }
             )
@@ -1410,12 +1704,64 @@ class LiveKotakNeoAdapter(KotakNeoReadOnlyPort):
         else:
             final_lot_size = expiry_lot_size
 
+        def _dedup_seq(seq: Sequence[str]) -> list[str]:
+            seen_local: set[str] = set()
+            out_local: list[str] = []
+            for item_s in seq:
+                if item_s and item_s not in seen_local:
+                    seen_local.add(item_s)
+                    out_local.append(item_s)
+            return out_local
+
+        listed_u = _dedup_seq(all_chain_neo_symbols)
+        selected_u = _dedup_seq(shortlisted_neos)
+        requested_u = _dedup_seq(requested_neos)
+        returned_u = _dedup_seq(returned_neo_symbols)
+        # Account for any requested symbol not even present in strikes_raw (if ever passed)
+        accounted_req = set(returned_u) | set(missing_neo_symbols)
+        for req_ns in requested_u:
+            if req_ns not in accounted_req:
+                if req_ns in quotes_map or req_ns.split("|", 1)[1] in quotes_map:
+                    returned_u.append(req_ns)
+                else:
+                    missing_neo_symbols.append(req_ns)
+        missing_u = _dedup_seq(missing_neo_symbols)
+        rejected_u = _dedup_seq(rejected_neo_symbols)
+        priced_u = _dedup_seq(priced_neo_symbols)
+
+        coverage_ledger = {
+            "expiry_date": expiry_date,
+            "listed": listed_u,
+            "selected": selected_u,
+            "requested": requested_u,
+            "returned": returned_u,
+            "missing": missing_u,
+            "rejected": rejected_u,
+            "priced": priced_u,
+            "counts": {
+                "listed": len(listed_u),
+                "selected": len(selected_u),
+                "requested": len(requested_u),
+                "returned": len(returned_u),
+                "missing": len(missing_u),
+                "rejected": len(rejected_u),
+                "priced": len(priced_u),
+            },
+        }
+
         return {
             "verification_tag": "UNVERIFIED_KOTAK_SCHEMA",
             "lot_size": final_lot_size if final_lot_size > 0 else None,
-            "shortlisted_neo_symbols": shortlisted_neos,
-            "priced_neo_symbols": priced_neo_symbols,
-            "chain_neo_symbols": all_chain_neo_symbols,
+            "fetch_started_at_ist": fetch_started_dt.isoformat(),
+            "fetch_completed_at_ist": fetch_completed_dt.isoformat(),
+            "shortlisted_neo_symbols": selected_u,
+            "requested_neo_symbols": requested_u,
+            "returned_neo_symbols": returned_u,
+            "missing_neo_symbols": missing_u,
+            "rejected_neo_symbols": rejected_u,
+            "priced_neo_symbols": priced_u,
+            "chain_neo_symbols": listed_u,
+            "coverage_ledger": coverage_ledger,
             "rejected_depth_books": rejected_depth_books,
             "strikes": strikes,
         }

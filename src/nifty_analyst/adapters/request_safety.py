@@ -14,12 +14,23 @@ Enforces the live-verified safety invariants:
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from nifty_analyst.scrubber import IST, ensure_ist
+
+try:
+    import httpx as _httpx
+
+    _HttpBaseTransport: type[Any] = _httpx.BaseTransport
+except ImportError:  # pragma: no cover - offline environments without kotakneoapi/httpx
+    _httpx = None  # type: ignore[assignment]
+    _HttpBaseTransport = object
 
 ALLOWED_HISTORY_INTERVALS: frozenset[str] = frozenset(
     {"1min", "3min", "5min", "10min", "15min", "30min", "60min", "D", "W"}
@@ -179,6 +190,10 @@ class DepthBookInterpretation:
     visible_sell_qty: int | None = None
     buy_levels: tuple[tuple[float, int], ...] = ()
     sell_levels: tuple[tuple[float, int], ...] = ()
+    # Diagnostic-only sorted snapshots when source order is inconsistent.
+    # NEVER used for best_bid, best_ask, walk_depth_levels, pricing, or risk!
+    diagnostic_sorted_buy_levels: tuple[tuple[float, int], ...] = ()
+    diagnostic_sorted_sell_levels: tuple[tuple[float, int], ...] = ()
 
     @property
     def is_structurally_valid(self) -> bool:
@@ -330,7 +345,24 @@ def interpret_depth_book(
     buy_prices = [p for p, _ in valid_buys]
     sell_prices = [p for p, _ in valid_sells]
     if buy_prices != sorted(buy_prices, reverse=True) or sell_prices != sorted(sell_prices):
-        return reject("DEPTH_LEVEL_ORDER_INCONSISTENT")
+        return DepthBookInterpretation(
+            is_executable=False,
+            best_bid=None,
+            best_ask=None,
+            bid_depth_lots=None,
+            ask_depth_lots=None,
+            resolved_lot_size=contract_lot,
+            rejection_reason="DEPTH_LEVEL_ORDER_INCONSISTENT",
+            raw_payload=dict(quote_payload),
+            diagnostic_sorted_buy_levels=tuple(
+                (round(p, 4), int(q))
+                for p, q in sorted(valid_buys, key=lambda r: r[0], reverse=True)
+            ),
+            diagnostic_sorted_sell_levels=tuple(
+                (round(p, 4), int(q))
+                for p, q in sorted(valid_sells, key=lambda r: r[0])
+            ),
+        )
     # Ordered duplicate prices are valid. No source reordering or row-one fallback.
 
     best_bid = valid_buys[0][0]
@@ -373,6 +405,278 @@ def interpret_depth_book(
     )
 
 
+@dataclass(frozen=True)
+class ContractTimestampEvaluation:
+    """Per-contract quote timestamp normalization & provenance record.
+
+    Separates `fetch_started_at_ist` / `fetch_completed_at_ist` from per-contract
+    `normalized_quote_as_of_ist`. Never substitutes fetch time for missing, malformed,
+    or wrong-unit contract timestamps, and keeps unknown REST field semantics (`lstup_time`)
+    explicitly tagged `UNVERIFIED_KOTAK_REST_LSTUP_TIME` until upstream REST semantics
+    are verified.
+    """
+
+    is_valid: bool
+    is_certified: bool
+    normalized_quote_as_of_ist: str | None
+    raw_value: Any
+    source_field: str
+    detected_unit: str
+    semantics_status: str
+    age_seconds: float | None = None
+    rejection_reason: str = ""
+
+
+_EPOCH_SECONDS_MIN_2000 = 946_684_800.0
+_EPOCH_SECONDS_MAX_2100 = 4_102_444_800.0
+_EPOCH_MILLISECONDS_FLOOR = 100_000_000_000.0
+
+_VERIFIED_CONTRACT_TS_FIELDS: tuple[str, ...] = (
+    "quote_as_of_ist",
+    "book_update_time_ist",
+)
+_CANDIDATE_CONTRACT_TS_FIELDS: tuple[str, ...] = (
+    "lstup_time",
+    "exchange_timestamp_ist",
+    "quote_updated_at",
+)
+
+
+def normalize_contract_quote_timestamp(
+    quote_payload: dict[str, Any] | None,
+    reference_dt_ist: dt.datetime,
+    *,
+    max_staleness_seconds: float = 180.0,
+    max_future_skew_seconds: float = 5.0,
+    verified_semantics: bool = False,
+    require_present: bool = True,
+) -> ContractTimestampEvaluation:
+    """Normalize and validate a per-contract quote timestamp without fetch-time substitution.
+
+    - Preserves `raw_value`, `source_field`, `detected_unit`, and `semantics_status`.
+    - Kotak REST `lstup_time` appears in `docs/functions/market_data/quotes.md` sample JSON
+      as a 10-digit Unix-second string (e.g. `"1794455573"`), but is omitted from the REST
+      Response Fields table; therefore `semantics_status` defaults to
+      `"UNVERIFIED_KOTAK_REST_LSTUP_TIME"` (`is_certified=False`) unless `verified_semantics=True`
+      or an explicitly verified field (`quote_as_of_ist` / `book_update_time_ist`) is supplied.
+    - Rejects missing (when `require_present=True`), malformed, boolean, NaN/Inf, sentinel (`<= 0`,
+      e.g. `0` or `-2209008600`), millisecond/microsecond (`>= 1e11`), out-of-range (`< 2000` or
+      `> 2100`), naive-timezone ISO, future (`age < -max_future_skew_seconds`), and stale
+      (`age > max_staleness_seconds`) values — NEVER replacing them with fetch time.
+    """
+    ref_ist = ensure_ist(reference_dt_ist)
+    if not isinstance(quote_payload, dict):
+        return ContractTimestampEvaluation(
+            is_valid=not require_present,
+            is_certified=False,
+            normalized_quote_as_of_ist=None,
+            raw_value=None,
+            source_field="",
+            detected_unit="MISSING",
+            semantics_status="MISSING_CONTRACT_TIMESTAMP",
+            rejection_reason="QUOTE_TIMESTAMP_MISSING" if require_present else "",
+        )
+
+    source_field = ""
+    raw_value: Any = None
+    field_inherently_verified = False
+    for k in _VERIFIED_CONTRACT_TS_FIELDS:
+        if k in quote_payload and quote_payload[k] is not None:
+            source_field = k
+            raw_value = quote_payload[k]
+            field_inherently_verified = True
+            break
+    if not source_field:
+        for k in _CANDIDATE_CONTRACT_TS_FIELDS:
+            if k in quote_payload and quote_payload[k] is not None:
+                source_field = k
+                raw_value = quote_payload[k]
+                break
+
+    if not source_field or raw_value is None:
+        return ContractTimestampEvaluation(
+            is_valid=not require_present,
+            is_certified=False,
+            normalized_quote_as_of_ist=None,
+            raw_value=None,
+            source_field="",
+            detected_unit="MISSING",
+            semantics_status="MISSING_CONTRACT_TIMESTAMP",
+            rejection_reason="QUOTE_TIMESTAMP_MISSING" if require_present else "",
+        )
+
+    if field_inherently_verified or verified_semantics:
+        sem_status = "VERIFIED_CONTRACT_QUOTE_AS_OF"
+    elif source_field == "lstup_time":
+        sem_status = "UNVERIFIED_KOTAK_REST_LSTUP_TIME"
+    else:
+        sem_status = "UNVERIFIED_CANDIDATE_FIELD"
+
+    if isinstance(raw_value, bool):
+        return ContractTimestampEvaluation(
+            is_valid=False,
+            is_certified=False,
+            normalized_quote_as_of_ist=None,
+            raw_value=raw_value,
+            source_field=source_field,
+            detected_unit="MALFORMED",
+            semantics_status="INVALID_CONTRACT_TIMESTAMP",
+            rejection_reason=f"QUOTE_TIMESTAMP_MALFORMED:{source_field}=bool",
+        )
+
+    parsed_dt: dt.datetime | None = None
+    detected_unit = ""
+
+    if isinstance(raw_value, str):
+        s = raw_value.strip()
+        if not s:
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="MALFORMED",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_MALFORMED:{source_field}=empty",
+            )
+        # Check ISO-8601 datetime string before numeric epoch parsing
+        if "T" in s or ("-" in s[1:] and ":" in s):
+            iso_s = s[:-1] + "+00:00" if s.endswith("Z") else s
+            try:
+                cand_dt = dt.datetime.fromisoformat(iso_s)
+            except ValueError:
+                return ContractTimestampEvaluation(
+                    is_valid=False,
+                    is_certified=False,
+                    normalized_quote_as_of_ist=None,
+                    raw_value=raw_value,
+                    source_field=source_field,
+                    detected_unit="MALFORMED",
+                    semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                    rejection_reason=f"QUOTE_TIMESTAMP_MALFORMED:{source_field}={s!r}",
+                )
+            if cand_dt.tzinfo is None or cand_dt.utcoffset() is None:
+                return ContractTimestampEvaluation(
+                    is_valid=False,
+                    is_certified=False,
+                    normalized_quote_as_of_ist=None,
+                    raw_value=raw_value,
+                    source_field=source_field,
+                    detected_unit="NAIVE_ISO8601",
+                    semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                    rejection_reason=f"QUOTE_TIMESTAMP_NAIVE_TIMEZONE:{source_field}={s!r}",
+                )
+            parsed_dt = cand_dt.astimezone(IST)
+            detected_unit = "ISO8601_IST"
+
+    if parsed_dt is None:
+        try:
+            num_val = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="MALFORMED",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_MALFORMED:{source_field}={raw_value!r}",
+            )
+        if not math.isfinite(num_val):
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="MALFORMED",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_MALFORMED:{source_field}=non_finite",
+            )
+        if num_val <= 0.0:
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="WRONG_UNIT_SENTINEL",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_WRONG_UNIT_SENTINEL:{source_field}={raw_value!r}",
+            )
+        if num_val >= _EPOCH_MILLISECONDS_FLOOR:
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="WRONG_UNIT_EPOCH_MS",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_WRONG_UNIT_MS_OR_NS:{source_field}={raw_value!r}",
+            )
+        if num_val < _EPOCH_SECONDS_MIN_2000 or num_val > _EPOCH_SECONDS_MAX_2100:
+            return ContractTimestampEvaluation(
+                is_valid=False,
+                is_certified=False,
+                normalized_quote_as_of_ist=None,
+                raw_value=raw_value,
+                source_field=source_field,
+                detected_unit="WRONG_UNIT_OUT_OF_RANGE",
+                semantics_status="INVALID_CONTRACT_TIMESTAMP",
+                rejection_reason=f"QUOTE_TIMESTAMP_WRONG_UNIT_RANGE:{source_field}={raw_value!r}",
+            )
+        parsed_dt = dt.datetime.fromtimestamp(num_val, tz=dt.timezone.utc).astimezone(IST)
+        detected_unit = "UNIX_EPOCH_SECONDS"
+
+    norm_iso = parsed_dt.isoformat()
+    age_sec = round((ref_ist - parsed_dt).total_seconds(), 6)
+    if age_sec < -float(max_future_skew_seconds):
+        return ContractTimestampEvaluation(
+            is_valid=False,
+            is_certified=False,
+            normalized_quote_as_of_ist=norm_iso,
+            raw_value=raw_value,
+            source_field=source_field,
+            detected_unit=detected_unit,
+            semantics_status=sem_status,
+            age_seconds=age_sec,
+            rejection_reason=(
+                f"QUOTE_TIMESTAMP_FUTURE_SKEW:{source_field}={norm_iso}"
+                f"(age={age_sec:.3f}s<-{max_future_skew_seconds}s)"
+            ),
+        )
+    if age_sec > float(max_staleness_seconds):
+        return ContractTimestampEvaluation(
+            is_valid=False,
+            is_certified=False,
+            normalized_quote_as_of_ist=norm_iso,
+            raw_value=raw_value,
+            source_field=source_field,
+            detected_unit=detected_unit,
+            semantics_status=sem_status,
+            age_seconds=age_sec,
+            rejection_reason=(
+                f"QUOTE_TIMESTAMP_STALE:{source_field}={norm_iso}"
+                f"(age={age_sec:.3f}s>{max_staleness_seconds}s)"
+            ),
+        )
+
+    return ContractTimestampEvaluation(
+        is_valid=True,
+        is_certified=(sem_status == "VERIFIED_CONTRACT_QUOTE_AS_OF"),
+        normalized_quote_as_of_ist=norm_iso,
+        raw_value=raw_value,
+        source_field=source_field,
+        detected_unit=detected_unit,
+        semantics_status=sem_status,
+        age_seconds=age_sec,
+        rejection_reason="",
+    )
+
+
 class PacedQueueCapExceededError(RuntimeError):
     """Raised when cumulative serial pacing wait would breach the 35s per-run queue cap."""
 
@@ -381,17 +685,18 @@ class PacedCooldownActiveError(RuntimeError):
     """Raised when a persisted HTTP 429 cooldown is still active."""
 
 
+class HttpRateLimit429Error(RuntimeError):
+    """Raised immediately at the HTTP transport boundary upon HTTP 429 with zero retry."""
+
+
 class PacedReadTransport:
-    """Serial read-only adapter-call pacer enforcing 2.5s spacing, 35s queue cap, and 429 cooldown.
+    """Serial read-only request pacer enforcing 2.5s spacing, 35s queue cap, and 429 cooldown.
 
     LIMITATION (`HTTP_BOUNDARY_PACING_UNVERIFIED`):
-    This pacer spaces top-level calls issued by `LiveKotakNeoAdapter` (`client.quotes`,
-    `client.historical_data`, and `OptionChainService` methods). Because `~/Kotak_API`'s
-    `OptionChainService` wrappers (`get_full_option_chain`, `get_futures_chain`, `get_expiries`)
-    can internally perform multiple HTTP requests (chain, spot, futures) without sharing this
-    pacer, wrapper-level call counting does NOT certify 2.5s spacing at the underlying HTTP
-    socket boundary. Live readiness (`is_live_ready`) therefore remains gated OFF until
-    HTTP-boundary pacing is verified.
+    Standalone wrapper-level `PacedReadTransport` spaces top-level adapter calls unless wired
+    at the underlying `NeoAPI` HTTP client boundary via `SharedPacedHttpTransport` (which
+    counts and paces every actual HTTP `GET` request across compound `Kotak_API` wrapper calls
+    and coordinates cross-process spacing via `pacing_state_file_path`).
     """
 
     HTTP_BOUNDARY_PACING_UNVERIFIED: bool = True
@@ -402,6 +707,9 @@ class PacedReadTransport:
         max_queue_wait_seconds: float = 35.0,
         cooldown_seconds_on_429: float = 900.0,
         cooldown_file_path: str | Path | None = None,
+        pacing_state_file_path: str | Path | None = None,
+        strict_guard_seconds: float = 0.0,
+        early_wake_guard_seconds: float = 0.001,
         clock_fn: Callable[[], float] = time.monotonic,
         wall_time_fn: Callable[[], float] = time.time,
         sleep_fn: Callable[[float], None] = time.sleep,
@@ -410,12 +718,21 @@ class PacedReadTransport:
         self.max_queue_wait_seconds = float(max_queue_wait_seconds)
         self.cooldown_seconds_on_429 = float(cooldown_seconds_on_429)
         self.cooldown_file_path = Path(cooldown_file_path) if cooldown_file_path else None
+        self.pacing_state_file_path = (
+            Path(pacing_state_file_path) if pacing_state_file_path else None
+        )
+        self.strict_guard_seconds = max(0.0, float(strict_guard_seconds))
+        self.early_wake_guard_seconds = max(0.0, float(early_wake_guard_seconds))
         self._clock_fn = clock_fn
         self._wall_time_fn = wall_time_fn
         self._sleep_fn = sleep_fn
         self._last_request_ts: float | None = None
         self.request_count: int = 0
+        self.http_request_count: int = 0
         self.cumulative_wait_seconds: float = 0.0
+        self.actual_slept_seconds: float = 0.0
+        self.request_timestamps: list[float] = []
+        self.http_boundary_attached: bool = False
 
     def check_persisted_429_cooldown(self) -> None:
         """Raise PacedCooldownActiveError if a persisted 429 cooldown has not yet expired."""
@@ -452,15 +769,34 @@ class PacedReadTransport:
         except Exception:
             pass
 
-    def wait_for_slot(self) -> None:
-        """Enforce serial interval and 35s cumulative queue cap before issuing a read call."""
-        self.check_persisted_429_cooldown()
+    def _wait_in_process(self) -> float:
         now = self._clock_fn()
+        effective_interval = (
+            self.min_interval_seconds + self.strict_guard_seconds
+            if self.min_interval_seconds > 0.0
+            else 0.0
+        )
+        target_ts: float | None = None
         wait_needed = 0.0
-        if self._last_request_ts is not None and self.min_interval_seconds > 0.0:
-            elapsed = now - self._last_request_ts
-            if elapsed < self.min_interval_seconds:
-                wait_needed = self.min_interval_seconds - elapsed
+        if self._last_request_ts is not None and effective_interval > 0.0:
+            target_ts = self._last_request_ts + effective_interval
+            if now < target_ts:
+                wait_needed = target_ts - now
+
+        # Also incorporate cross-process wall-clock spacing when pacing_state_file_path is active
+        if self.pacing_state_file_path is not None and effective_interval > 0.0:
+            try:
+                if self.pacing_state_file_path.exists():
+                    st = json.loads(self.pacing_state_file_path.read_text(encoding="utf-8"))
+                    last_wall = float(st.get("last_request_wall_epoch", 0.0))
+                    wall_elapsed = self._wall_time_fn() - last_wall
+                    if 0.0 <= wall_elapsed < effective_interval:
+                        cross_wait = effective_interval - wall_elapsed
+                        if cross_wait > wait_needed:
+                            wait_needed = cross_wait
+                            target_ts = now + wait_needed
+            except Exception:
+                pass
 
         projected_wait = self.cumulative_wait_seconds + wait_needed
         if self.max_queue_wait_seconds > 0.0 and projected_wait > self.max_queue_wait_seconds + 1e-9:
@@ -469,9 +805,117 @@ class PacedReadTransport:
                 f"max_queue_wait_seconds {self.max_queue_wait_seconds:.2f}s after {self.request_count} calls."
             )
 
-        if wait_needed > 0.0:
-            self._sleep_fn(wait_needed)
+        actual_slept = 0.0
+        if wait_needed > 0.0 and target_ts is not None:
+            first_pass = True
+            while True:
+                cur = self._clock_fn()
+                rem = target_ts - cur
+                if rem <= 0.0:
+                    break
+                sleep_dur = rem if first_pass else max(rem, self.early_wake_guard_seconds)
+                first_pass = False
+                self._sleep_fn(sleep_dur)
+                after = self._clock_fn()
+                if after <= cur:
+                    # Non-advancing synthetic clock in unit test (`sleep_fn=lambda s: None`)
+                    actual_slept += wait_needed
+                    break
+                actual_slept += after - cur
             self.cumulative_wait_seconds += wait_needed
+            self.actual_slept_seconds += actual_slept
 
-        self._last_request_ts = self._clock_fn()
+        stamp = self._clock_fn()
+        self._last_request_ts = stamp
+        self.request_timestamps.append(stamp)
         self.request_count += 1
+        if self.pacing_state_file_path is not None:
+            try:
+                self.pacing_state_file_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_s = self.pacing_state_file_path.with_suffix(".tmp")
+                tmp_s.write_text(
+                    json.dumps({"last_request_wall_epoch": self._wall_time_fn()}),
+                    encoding="utf-8",
+                )
+                tmp_s.replace(self.pacing_state_file_path)
+            except Exception:
+                pass
+        return stamp
+
+    def wait_for_slot(self) -> None:
+        """Enforce monotonic `>= min_interval_seconds` spacing, 35s queue cap, and cross-process lock."""
+        self.check_persisted_429_cooldown()
+        if self.pacing_state_file_path is None:
+            self._wait_in_process()
+            return
+        self.pacing_state_file_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.pacing_state_file_path.with_suffix(".lock")
+        with lock_path.open("a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                self.check_persisted_429_cooldown()
+                self._wait_in_process()
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+class SharedPacedHttpTransport(_HttpBaseTransport):
+    """HTTP-boundary read-only transport (`httpx.BaseTransport`) shared across compound calls.
+
+    - Wraps an `httpx.BaseTransport` (e.g. `NeoAPI(..., transport=...)` or `rest_client._client._transport`).
+    - Rejects any non-`GET` HTTP method before touching the wire.
+    - Enforces shared monotonic `>= 2.5s` spacing (with `strict_guard_seconds` + early-wakeup loop)
+      on EVERY actual HTTP request, even when a single `Kotak_API` wrapper method issues multiple
+      internal HTTP calls (`option_chain`, `spot`, `futures`).
+    - Records `http_request_count` and `http_request_timestamps` separately from adapter-level calls.
+    - Immediately records persisted 429 cooldown and raises `HttpRateLimit429Error` with ZERO retry
+      whenever an HTTP 429 status or exception occurs.
+    """
+
+    def __init__(
+        self,
+        inner_transport: Any,
+        pacer: PacedReadTransport,
+    ) -> None:
+        self._inner = inner_transport
+        self.pacer = pacer
+        self.pacer.http_boundary_attached = True
+        self.http_request_count: int = 0
+        self.http_request_timestamps: list[float] = []
+
+    def handle_request(self, request: Any) -> Any:
+        method = str(getattr(request, "method", "GET") or "GET").upper()
+        if method != "GET":
+            raise PermissionError(
+                f"SharedPacedHttpTransport blocked non-GET HTTP method {method!r}; "
+                "analyst market-data transport is strictly read-only."
+            )
+        self.pacer.wait_for_slot()
+        self.http_request_count += 1
+        self.pacer.http_request_count += 1
+        if self.pacer.request_timestamps:
+            self.http_request_timestamps.append(self.pacer.request_timestamps[-1])
+
+        try:
+            response = self._inner.handle_request(request)
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "too many" in msg.lower():
+                self.pacer.record_429_cooldown(msg)
+                raise HttpRateLimit429Error(
+                    f"HTTP 429 at Kotak HTTP transport boundary ({msg[:200]}); hard stop, zero retries."
+                ) from exc
+            raise
+
+        status_code = getattr(response, "status_code", None)
+        if status_code == 429 or str(status_code) == "429":
+            self.pacer.record_429_cooldown("HTTP_429_STATUS")
+            raise HttpRateLimit429Error(
+                "HTTP 429 response at Kotak HTTP transport boundary; hard stop, zero retries."
+            )
+        return response
+
+    def close(self) -> None:
+        close_fn = getattr(self._inner, "close", None)
+        if callable(close_fn):
+            close_fn()

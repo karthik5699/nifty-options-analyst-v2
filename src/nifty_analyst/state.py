@@ -81,10 +81,12 @@ class RunMetadata:
     evidence_sha256: str = ""
     capture_started_at_ist: str = ""
     capture_completed_at_ist: str = ""
-    surface_coverage_status: Literal["MULTI_EXPIRY_FULL", "SINGLE_EXPIRY_DEGRADED"] = (
-        "MULTI_EXPIRY_FULL"
-    )
+    surface_coverage_status: Literal[
+        "MULTI_EXPIRY_FULL", "SINGLE_EXPIRY_DEGRADED", "INCOMPLETE_SURFACE_COVERAGE"
+    ] = "MULTI_EXPIRY_FULL"
+    surface_coverage_detail: str = ""
     uncovered_held_neo_symbols: list[str] = field(default_factory=list)
+    coverage_ledger: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,7 @@ class OpenPosition:
     short_leg_deltas: list[float]
     dte_trading_sessions: int
     neo_symbols: list[str] = field(default_factory=list)
+    expiry_date: str = ""
 
 
 @dataclass(frozen=True)
@@ -186,6 +189,7 @@ class VolatilityEvidence:
         "EOD_CLOSE_INFERRED",
         "LIVE_INTRADAY_SPOT_ATM_NEAREST_EXPIRY",
         "LIVE_VARIANCE_INTERPOLATED_CM30",
+        "UNCERTIFIED_INCOMPLETE_SURFACE",
     ]
     ivp_30d: float | Literal["UNKNOWN"]
     ivp_90d: float | Literal["UNKNOWN"]

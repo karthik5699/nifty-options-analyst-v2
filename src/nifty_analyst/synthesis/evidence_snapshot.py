@@ -214,7 +214,9 @@ def build_canonical_evidence_body(
         "capture_started_at_ist": str(meta.get("capture_started_at_ist") or ""),
         "capture_completed_at_ist": str(meta.get("capture_completed_at_ist") or ""),
         "surface_coverage_status": str(meta.get("surface_coverage_status") or "MULTI_EXPIRY_FULL"),
+        "surface_coverage_detail": str(meta.get("surface_coverage_detail") or ""),
         "uncovered_held_neo_symbols": list(meta.get("uncovered_held_neo_symbols") or []),
+        "coverage_ledger": dict(meta.get("coverage_ledger") or {}),
         "source_provenance": provenance,
         "candidate_identities": _candidate_identities_from_dicts(cands),
         "pre_llm_state": {
@@ -428,7 +430,9 @@ def reconstruct_state_from_snapshot_doc(snapshot_doc: dict[str, Any]) -> NiftyOp
         capture_started_at_ist=str(body["capture_started_at_ist"]),
         capture_completed_at_ist=str(body["capture_completed_at_ist"]),
         surface_coverage_status=body.get("surface_coverage_status", "MULTI_EXPIRY_FULL"),
+        surface_coverage_detail=str(body.get("surface_coverage_detail") or ""),
         uncovered_held_neo_symbols=[str(x) for x in body.get("uncovered_held_neo_symbols", [])],
+        coverage_ledger=dict(body.get("coverage_ledger") or {}),
     )
 
     contract_ctx = ContractContext(
